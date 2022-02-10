@@ -14,15 +14,20 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+from apex.parallel import DistributedDataParallel as DDP
+from apex.parallel import convert_syncbn_model
 from tqdm import tqdm
 from models.wide_resnet import *
+
 from dataset.stl10 import DATASET_GETTERS
 from utils import AverageMeter, accuracy, setup_logger
+
 import models
 import pdb
 import math
 import torchvision
 from models.vae import *
+
 logger = logging.getLogger(__name__)
 best_acc = 0
 
@@ -119,11 +124,6 @@ def main():
                         help='path to latest checkpoint (default: none)')
     parser.add_argument('--seed', default=None, type=int,
                         help="random seed")
-    parser.add_argument("--amp", action="store_true",
-                        help="use 16-bit (mixed) precision through NVIDIA apex AMP")
-    parser.add_argument("--opt_level", type=str, default="O1",
-                        help="apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
-                        "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank")
     parser.add_argument('--no-progress', action='store_true',
@@ -179,7 +179,7 @@ def main():
         f"device: {args.device}, "
         f"n_gpu: {args.n_gpu}, "
         f"distributed training: {bool(args.local_rank != -1)}, "
-        f"16-bits training: {args.amp}",)
+    )
 
     logger.info(dict(args._get_kwargs()))
 
@@ -235,7 +235,7 @@ def main():
     model = create_model(args)
 
     vae = SVAE_cifar_withbn(128, args.dim)
-    vae.cuda()
+    vae.to(args.device)
     vae.load_state_dict(torch.load(args.vae_path))
     vae.eval()
 
@@ -277,17 +277,10 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
 
-    if args.amp:
-        from apex import amp
-        model, optimizer = amp.initialize(
-            model, optimizer, opt_level=args.opt_level)
-        vae = amp.initialize(
-            models=vae, opt_level=args.opt_level)
-
     if args.local_rank != -1:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.local_rank],
-            output_device=args.local_rank, find_unused_parameters=True)
+        model = convert_syncbn_model(model)
+        model = DDP(model, delay_allreduce=True)
+        vae = DDP(vae, delay_allreduce=True)
 
     print("***** Running training *****")
     print(f"  Task = {args.dataset}@{args.num_labeled}")
@@ -298,8 +291,6 @@ def main():
     print(f"  Total optimization steps = {args.total_steps}")
 
     model.zero_grad()
-    if args.amp:
-        from apex import amp
     test_accs = []
     end = time.time()
 
@@ -311,7 +302,6 @@ def main():
 
     labeled_iter = iter(labeled_trainloader)
     unlabeled_iter = iter(unlabeled_trainloader)
-    total_epoch = 0
 
     def run_iter(
             inputs_x_w: torch.Tensor,
@@ -335,15 +325,11 @@ def main():
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
         x_prior = Variable(inputs_u_w.detach(), requires_grad=True)
-        z, gx, mu, logvar = vae(x_prior)
+        _, gx, _, _ = vae(x_prior)
         logits_adv = model(x_prior, adv=True)
         loss_tmp = F.mse_loss(inputs_u_w.detach(), gx) \
                    - args.gamma*F.cross_entropy(logits_adv, targets_u)
-        if args.amp:
-             with amp.scale_loss(loss_tmp, optimizer) as scaled_loss:
-                 scaled_loss.backward()
-        else:
-             loss_tmp.backward()
+        loss_tmp.backward()
         with torch.no_grad():
             sign_grad = x_prior.grad.data.sign()
             x_prior = x_prior + args.eps * sign_grad
@@ -361,16 +347,12 @@ def main():
         mask = max_probs.ge(args.threshold).float()
         l_cs = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
 
-        logits_adv = model(x_prior.detach(), adv=True)
-        l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
-
-        loss = l_ce + l_cs + args.alpha * l_adv
+        # logits_adv = model(x_prior.detach(), adv=True)
+        # l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
+        l_adv = l_cs
+        loss = l_ce + l_cs# + args.alpha * l_adv
         optimizer.zero_grad()
-        if args.amp:
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            loss.backward()
+        loss.backward()
         optimizer.step()
 
         prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
@@ -387,7 +369,7 @@ def main():
                      'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
                      'mask': mask.mean().item(),
                      'lr': optimizer.param_groups[0]['lr']})
-        if batch_idx == 1:
+        if batch_idx == 1 and args.local_rank in [-1, 0]:
             reconst_images(gx, x_prior, inputs_u_w, run)
         return l_cs, l_ce, l_adv, mask
 
@@ -398,7 +380,6 @@ def main():
         losses_adv = AverageMeter()
         losses_u = AverageMeter()
         mask_probs = AverageMeter()
-        total_epoch += 1
         if not args.no_progress:
             p_bar = tqdm(range(args.eval_step),
                          disable=args.local_rank not in [-1, 0])
