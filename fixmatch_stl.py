@@ -33,14 +33,13 @@ best_acc = 0
 
 
 def reconst_images(gx, x_adv, strong_x, run):
-    grid_X = torchvision.utils.make_grid(strong_x[32:96].data, nrow=8, padding=2, normalize=True)
-    run.log({"X.jpg": [wandb.Image(grid_X)]}, commit=False)
-    grid_GX = torchvision.utils.make_grid(gx[32:96].data, nrow=8, padding=2, normalize=True)
-    wandb.log({"GX.jpg": [wandb.Image(grid_GX)]}, commit=False)
-    grid_AdvX = torchvision.utils.make_grid(x_adv[32:96].data, nrow=8, padding=2, normalize=True)
-    wandb.log({"AdvX.jpg": [wandb.Image(grid_AdvX)]}, commit=False)
-    grid_Delta = torchvision.utils.make_grid(x_adv[32:96]-strong_x[32:96].data, nrow=8, padding=2, normalize=True)
-    wandb.log({"Delta.jpg": [wandb.Image(grid_Delta)]}, commit=False)
+    grid_X = torchvision.utils.make_grid(strong_x[:10].data, nrow=10, padding=2, normalize=True)
+    grid_GX = torchvision.utils.make_grid(gx[:10].data, nrow=10, padding=2, normalize=True)
+    grid_AdvX = torchvision.utils.make_grid(x_adv[:10].data, nrow=10, padding=2, normalize=True)
+    grid_Delta = torchvision.utils.make_grid(x_adv[:10]-strong_x[:10].data, nrow=10, padding=2, normalize=True)
+    grid = torch.cat((grid_GX, grid_X, grid_AdvX, grid_Delta), dim=1)
+    run.log({"Batch.jpg": [
+        wandb.Image(grid)]}, commit=False)
 
 
 def save_checkpoint(state, is_best, checkpoint, filename='checkpoint.pth.tar'):
@@ -326,8 +325,9 @@ def main():
         x_prior = Variable(inputs_u_w.detach(), requires_grad=True)
         _, gx, _, _ = vae(x_prior)
         logits_adv = model(x_prior, adv=True)
-        loss_tmp = F.mse_loss(inputs_u_w.detach(), gx) \
-                   - args.gamma*F.cross_entropy(logits_adv, targets_u)
+        mse = F.mse_loss(inputs_u_w.detach(), gx)
+        ce = F.cross_entropy(logits_adv, targets_u)
+        loss_tmp = mse - args.gamma * ce
         loss_tmp.backward()
         with torch.no_grad():
             sign_grad = x_prior.grad.data.sign()
@@ -361,6 +361,8 @@ def main():
             run.log({'l_cs': l_cs.data.item(),
                      'l_ce': l_ce.data.item(),
                      'l_adv': l_adv.data.item(),
+                     'ce': ce.data.item(),
+                     'mse': mse.data.item(),
                      'ACC/acc': prec.item(),
                      'ACC/acc_unlab': prec_unlab.item(),
                      'ACC/acc_unlab_adv': prec_unlab_adv.item(),
