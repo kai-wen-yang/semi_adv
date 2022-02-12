@@ -148,17 +148,17 @@ class WideResNet(nn.Module):
 
     def forward(self, x, return_feature=False, adv=False):
         out = self.conv1(x)
-        out = self.layer1(out, adv)
-        out = self.layer2(out, adv)
-        out = self.layer3(out, adv)
+        out1 = self.layer1(out, adv)
+        out2 = self.layer2(out1, adv)
+        out3 = self.layer3(out2, adv)
         if adv and self.bn_adv_flag:
-            out = self.relu(self.bn1_adv(out))
+            out = self.relu(self.bn1_adv(out3))
         else:
-            out = self.relu(self.bn1(out))
+            out = self.relu(self.bn1(out3))
         out = F.adaptive_avg_pool2d(out, 1)
         out = out.view(-1, self.channels)
         if return_feature:
-            return self.linear(out), self.normalize(out)
+            return self.linear(out), (out1, out2, out3)
         else:
             return self.linear(out)
 

@@ -26,17 +26,16 @@ import models
 import pdb
 import math
 import torchvision
-from models.vae import *
+
+from typing import List, Optional, Tuple, Union, cast
 
 logger = logging.getLogger(__name__)
 best_acc = 0
 
 
-def reconst_images(gx, x_adv, strong_x, run):
+def reconst_images(x_adv, strong_x, run):
     grid_X = torchvision.utils.make_grid(strong_x[32:96].data, nrow=8, padding=2, normalize=True)
     run.log({"X.jpg": [wandb.Image(grid_X)]}, commit=False)
-    grid_GX = torchvision.utils.make_grid(gx[32:96].data, nrow=8, padding=2, normalize=True)
-    wandb.log({"GX.jpg": [wandb.Image(grid_GX)]}, commit=False)
     grid_AdvX = torchvision.utils.make_grid(x_adv[32:96].data, nrow=8, padding=2, normalize=True)
     wandb.log({"AdvX.jpg": [wandb.Image(grid_AdvX)]}, commit=False)
     grid_Delta = torchvision.utils.make_grid(x_adv[32:96]-strong_x[32:96].data, nrow=8, padding=2, normalize=True)
@@ -49,6 +48,24 @@ def save_checkpoint(state, is_best, checkpoint, filename='checkpoint.pth.tar'):
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint,
                                                'model_best.pth.tar'))
+
+
+def normalize_flatten_features(
+    features: Tuple[torch.Tensor, ...],
+    eps=1e-10,
+) -> torch.Tensor:
+
+    normalized_features: List[torch.Tensor] = []
+    for feature_layer in features:
+        norm_factor = torch.sqrt(
+            torch.sum(feature_layer ** 2, dim=1, keepdim=True)) + eps
+        normalized_features.append(
+            (feature_layer / (norm_factor *
+                              np.sqrt(feature_layer.size()[2] *
+                                      feature_layer.size()[3])))
+            .view(feature_layer.size()[0], -1)
+        )
+    return torch.cat(normalized_features, dim=1)
 
 
 def set_seed(args):
@@ -129,7 +146,6 @@ def main():
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
     parser.add_argument('--dim', default=512, type=int, help='CNN_embed_dim')
-    parser.add_argument('--vae_path', default='./results/dim128_re50_kl1_ce0/model_epoch222.pth', type=str, help='vae_path')
     parser.add_argument('--eps', default=0.5, type=float, help='eps for adversarial')
     parser.add_argument('--alpha', default=1.0, type=float, help='alpha for adversarial')
     parser.add_argument('--gamma', default=1.0, type=float, help='alpha for adversarial')
@@ -233,11 +249,6 @@ def main():
 
     model = create_model(args)
 
-    vae = SVAE_cifar_withbn(128, args.dim)
-    vae.to(args.device)
-    vae.load_state_dict(torch.load(args.vae_path))
-    vae.eval()
-
     if args.local_rank == 0:
         torch.distributed.barrier()
 
@@ -279,7 +290,6 @@ def main():
     if args.local_rank != -1:
         model = convert_syncbn_model(model)
         model = DDP(model, delay_allreduce=True)
-        vae = DDP(vae, delay_allreduce=True)
 
     print("***** Running training *****")
     print(f"  Task = {args.dataset}@{args.num_labeled}")
@@ -320,21 +330,21 @@ def main():
         optimizer.zero_grad()
 
         with torch.no_grad():
-            logits_u_w = model(inputs_u_w, adv=True)
+            logits_u_w, feat_u_w = model(inputs_u_w, adv=True, return_feature=True)
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
         x_prior = Variable(inputs_u_w.detach(), requires_grad=True)
-        _, gx, _, _ = vae(x_prior)
-        logits_adv = model(x_prior, adv=True)
-        loss_tmp = F.mse_loss(inputs_u_w.detach(), gx) \
-                   - args.gamma*F.cross_entropy(logits_adv, targets_u)
+        logits_adv, feat_adv = model(x_prior, adv=True, return_feature=True)
+        pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
+        ce = args.gamma*F.cross_entropy(logits_adv, targets_u)
+        loss_tmp =  pip - args.gamma * ce
         loss_tmp.backward()
         with torch.no_grad():
             sign_grad = x_prior.grad.data.sign()
             x_prior = x_prior + args.eps * sign_grad
             x_prior.detach()
 
-        logits, feat = model(all_x, return_feature=True)
+        logits = model(all_x)
         logits_x = logits[:batch_size]
         logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
         del logits
@@ -361,6 +371,8 @@ def main():
             run.log({'l_cs': l_cs.data.item(),
                      'l_ce': l_ce.data.item(),
                      'l_adv': l_adv.data.item(),
+                     'pip': pip.data.item(),
+                     'ce': ce.data.item(),
                      'ACC/acc': prec.item(),
                      'ACC/acc_unlab': prec_unlab.item(),
                      'ACC/acc_unlab_adv': prec_unlab_adv.item(),
@@ -368,7 +380,7 @@ def main():
                      'mask': mask.mean().item(),
                      'lr': optimizer.param_groups[0]['lr']})
         if batch_idx == 1 and args.local_rank in [-1, 0]:
-            reconst_images(gx, x_prior, inputs_u_w, run)
+            reconst_images(x_prior, inputs_u_w, run)
         return l_cs, l_ce, l_adv, mask
 
     for epoch in range(args.start_epoch, args.epochs):

@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 from torchvision import datasets
 from torchvision import transforms
-
+import pdb
 from .randaugment import RandAugmentMC
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ def get_stl10(args, root):
     ])
 
     train_labeled_dataset = datasets.STL10(
-        root, split='train',
+        root, split='train', download=True,
         transform=transform_labeled)
 
     train_unlabeled_dataset = datasets.STL10(
