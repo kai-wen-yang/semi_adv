@@ -337,7 +337,8 @@ def main():
         x_prior = Variable(inputs_u_s.detach(), requires_grad=True)
         logits_adv, feat_adv = model(x_prior, adv=True, return_feature=True)
         pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
-        ce = args.gamma*F.cross_entropy(logits_adv, targets_u)
+        ce = F.cross_entropy(logits_adv, targets_u)
+
         loss_tmp =  pip - args.gamma * ce
         loss_tmp.backward()
         with torch.no_grad():

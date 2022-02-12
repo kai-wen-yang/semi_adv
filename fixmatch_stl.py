@@ -327,6 +327,12 @@ def main():
         logits_adv = model(x_prior, adv=True)
         mse = F.mse_loss(inputs_u_w.detach(), gx)
         ce = F.cross_entropy(logits_adv, targets_u)
+        # ##################
+        # if args.local_rank in [-1, 0]:
+        #     pdb.set_trace()
+        #     grad2 = torch.autograd.grad(outputs=ce, inputs=x_prior)
+        #     grad1 = torch.autograd.grad(outputs=mse, inputs=x_prior)
+        # #################
         loss_tmp = mse - args.gamma * ce
         loss_tmp.backward()
         with torch.no_grad():
