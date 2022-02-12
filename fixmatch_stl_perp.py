@@ -34,12 +34,12 @@ best_acc = 0
 
 
 def reconst_images(x_adv, strong_x, run):
-    grid_X = torchvision.utils.make_grid(strong_x[32:96].data, nrow=8, padding=2, normalize=True)
-    run.log({"X.jpg": [wandb.Image(grid_X)]}, commit=False)
-    grid_AdvX = torchvision.utils.make_grid(x_adv[32:96].data, nrow=8, padding=2, normalize=True)
-    wandb.log({"AdvX.jpg": [wandb.Image(grid_AdvX)]}, commit=False)
-    grid_Delta = torchvision.utils.make_grid(x_adv[32:96]-strong_x[32:96].data, nrow=8, padding=2, normalize=True)
-    wandb.log({"Delta.jpg": [wandb.Image(grid_Delta)]}, commit=False)
+    grid_X = torchvision.utils.make_grid(strong_x[:10].data, nrow=10, padding=2, normalize=True)
+    grid_AdvX = torchvision.utils.make_grid(x_adv[:10].data, nrow=10, padding=2, normalize=True)
+    grid_Delta = torchvision.utils.make_grid(x_adv[:10]-strong_x[:10].data, nrow=10, padding=2, normalize=True)
+    grid = torch.cat((grid_X, grid_AdvX, grid_Delta), dim=1)
+    run.log({"Batch.jpg": [
+        wandb.Image(grid)]}, commit=False)
 
 
 def save_checkpoint(state, is_best, checkpoint, filename='checkpoint.pth.tar'):
@@ -323,6 +323,7 @@ def main():
         model.train()
         all_x = torch.cat((inputs_x_w, inputs_u_w, inputs_u_s)).to(args.device)
         inputs_u_w = inputs_u_w.to(args.device)
+        inputs_u_s = inputs_u_s.to(args.device)
         targets_x = targets_x.to(args.device)
         targets_ux = targets_ux.to(args.device)
         batch_size = inputs_x_w.size(0)
@@ -333,7 +334,7 @@ def main():
             logits_u_w, feat_u_w = model(inputs_u_w, adv=True, return_feature=True)
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
-        x_prior = Variable(inputs_u_w.detach(), requires_grad=True)
+        x_prior = Variable(inputs_u_s.detach(), requires_grad=True)
         logits_adv, feat_adv = model(x_prior, adv=True, return_feature=True)
         pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
         ce = args.gamma*F.cross_entropy(logits_adv, targets_u)
@@ -380,7 +381,7 @@ def main():
                      'mask': mask.mean().item(),
                      'lr': optimizer.param_groups[0]['lr']})
         if batch_idx == 1 and args.local_rank in [-1, 0]:
-            reconst_images(x_prior, inputs_u_w, run)
+            reconst_images(x_prior, inputs_u_s, run)
         return l_cs, l_ce, l_adv, mask
 
     for epoch in range(args.start_epoch, args.epochs):
