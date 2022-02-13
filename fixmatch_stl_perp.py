@@ -358,7 +358,9 @@ def main():
         mask = max_probs.ge(args.threshold).float()
         l_cs = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
 
-        logits_adv = model(x_prior.detach(), adv=True)
+        logits_adv, feat_adv = model(x_prior.detach(), adv=True, return_feature=True)
+        pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
+        ce_after = F.cross_entropy(logits_adv, targets_u)
         l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
         loss = l_ce + l_cs + args.alpha * l_adv
         optimizer.zero_grad()
@@ -375,6 +377,8 @@ def main():
                      'l_adv': l_adv.data.item(),
                      'pip': pip.data.item(),
                      'ce': ce.data.item(),
+                     'pip_after': pip_after.data.item(),
+                     'ce_after': ce_after.data.item(),
                      'ACC/acc': prec.item(),
                      'ACC/acc_unlab': prec_unlab.item(),
                      'ACC/acc_unlab_adv': prec_unlab_adv.item(),
