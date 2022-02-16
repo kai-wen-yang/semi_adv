@@ -18,7 +18,7 @@ from apex.parallel import DistributedDataParallel as DDP
 from apex.parallel import convert_syncbn_model
 from tqdm import tqdm
 
-from dataset.stl10 import DATASET_GETTERS
+from dataset.cifar import DATASET_GETTERS
 from utils import AverageMeter, accuracy, setup_logger
 
 import models
@@ -79,7 +79,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='stl10', type=str,
-                        choices=['stl10'],
+                        choices=['stl10','cifar100'],
                         help='dataset name')
     parser.add_argument('--num-labeled', type=int, default=4000,
                         help='number of labeled data')
@@ -122,6 +122,11 @@ def main():
                         help='path to latest checkpoint (default: none)')
     parser.add_argument('--seed', default=None, type=int,
                         help="random seed")
+    parser.add_argument("--amp", action="store_true",
+                        help="use 16-bit (mixed) precision through NVIDIA apex AMP")
+    parser.add_argument("--opt_level", type=str, default="O1",
+                        help="apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
+                        "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank")
     parser.add_argument('--no-progress', action='store_true',
@@ -177,6 +182,7 @@ def main():
         f"device: {args.device}, "
         f"n_gpu: {args.n_gpu}, "
         f"distributed training: {bool(args.local_rank != -1)}, "
+        f"16-bits training: {args.amp}",
     )
 
     logger.info(dict(args._get_kwargs()))
@@ -191,10 +197,17 @@ def main():
         )
         setup_logger(args.out)
     if args.dataset == 'stl10':
+        vae = SVAE_cifar_withbn(128, args.dim)
         args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 34
             args.model_width = 2
+    elif args.dataset == 'cifar100':
+        vae = CVAE_cifar_withbn(128, args.dim)
+        args.num_classes = 100
+        if args.arch == 'wideresnet':
+            args.model_depth = 28
+            args.model_width = 8
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
@@ -232,7 +245,7 @@ def main():
 
     model = create_model(args)
     model.to(args.device)
-    vae = SVAE_cifar_withbn(128, args.dim)
+
     vae.to(args.device)
     vae.load_state_dict(torch.load(args.vae_path))
     vae.eval()
@@ -273,6 +286,11 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
 
+    if args.amp:
+        from apex import amp
+        [model, vae], optimizer = amp.initialize(
+            [model, vae], optimizer, opt_level=args.opt_level)
+
     if args.local_rank != -1:
         model = convert_syncbn_model(model)
         model = DDP(model, delay_allreduce=True)
@@ -287,6 +305,8 @@ def main():
     print(f"  Total optimization steps = {args.total_steps}")
 
     model.zero_grad()
+    if args.amp:
+        from apex import amp
     test_accs = []
     end = time.time()
 
@@ -315,25 +335,27 @@ def main():
         batch_size = inputs_x_w.size(0)
 
         optimizer.zero_grad()
-
         with torch.no_grad():
             logits_u_w = model(inputs_u_w, adv=True)
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
         x_prior = Variable(inputs_u_w.detach(), requires_grad=True)
         _, gx, _, _ = vae(x_prior)
-        pdb.set_trace()
         logits_adv = model(x_prior, adv=True)
         mse = F.mse_loss(inputs_u_w.detach(), gx)
         ce = F.cross_entropy(logits_adv, targets_u)
         loss_tmp = args.beta * mse - args.gamma * ce
-        loss_tmp.backward()
+        if args.amp:
+            with amp.scale_loss(loss_tmp, optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            loss_tmp.backward()
         with torch.no_grad():
             sign_grad = x_prior.grad.data.sign()
             x_prior = x_prior + args.eps * sign_grad
             x_prior.detach()
 
-        logits, feat = model(all_x, return_feature=True)
+        logits = model(all_x)
         logits_x = logits[:batch_size]
         logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
         del logits
@@ -343,6 +365,7 @@ def main():
         pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
         max_probs, targets_u = torch.max(pseudo_label, dim=-1)
         mask = max_probs.ge(args.threshold).float()
+
         l_cs = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
 
         logits_adv = model(x_prior.detach(), adv=True)
@@ -350,7 +373,11 @@ def main():
         l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
         loss = l_ce + l_cs + args.alpha * l_adv
         optimizer.zero_grad()
-        loss.backward()
+        if args.amp:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            loss.backward()
         optimizer.step()
 
         prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))

@@ -186,7 +186,7 @@ def main():
             config=args, name=args.out, save_code=True,
         )
 
-    if args.dataset == 'cifar10' or args.dataset == 'cifar10_v2':
+    if args.dataset == 'cifar10':
         args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 28
@@ -324,7 +324,7 @@ def main():
         with torch.no_grad():
             _, feat_weak = model(inputs_u_w,  return_feature=True, adv=True)
         x_adv = Variable(inputs_u_w.detach(), requires_grad=True)
-        _, feat_adv  = model(x_adv, return_feature=True, adv=True)
+        _, feat_adv = model(x_adv, return_feature=True, adv=True)
         l_ct_og = CL(feat_weak.detach(), feat_adv).mean()
         if args.amp:
             with amp.scale_loss(l_ct_og, optimizer) as scaled_loss:
