@@ -388,7 +388,8 @@ def main():
 
             logits, feat = model(all_x, return_feature=True)
             logits_x = logits[:batch_size]
-            feat_u_w = tuple(x[batch_size:8 * batch_size].detach() for x in feat)
+            with torch.no_grad():
+                feat_u_w = tuple(x[batch_size:8 * batch_size].detach() for x in feat)
             logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
             del logits, feat
 
@@ -403,7 +404,7 @@ def main():
             x_prior = Variable(inputs_u_s.detach(), requires_grad=True)
             logits_adv, feat_adv = model(x_prior, adv=True, return_feature=True)
             pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
-            ce = F.cross_entropy(logits_adv, targets_u)
+            ce = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
 
             loss_tmp = pip
             if args.amp:
@@ -436,7 +437,7 @@ def main():
 
             logits_adv, feat_adv = model(x_prior.detach(), adv=True, return_feature=True)
             pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
-            ce_after = F.cross_entropy(logits_adv, targets_u)
+            ce_after = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
             l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
             loss = l_ce + l_cs + l_adv
             optimizer.zero_grad()
@@ -451,6 +452,12 @@ def main():
             prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
             prec_unlab_adv, _ = accuracy(logits_adv.data, targets_ux.data, topk=(1, 5))
             prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
+            _, targets_u_s = torch.max(logits_u_s, 1)
+            if args.local_rank in [-1, 0]:
+                pdb.set_trace()
+            prec_pesudo_label = ((targets_u == targets_ux).float()[mask]).mean()
+            prec_pesudo_strong = ((targets_u == targets_u_s).float()[mask]).mean()
+            prec_pesudo_adv = ((targets_u == targets_adv).float()[mask]).mean()
             if args.local_rank in [-1, 0]:
                 run.log({'l_cs': l_cs.data.item(),
                          'l_ce': l_ce.data.item(),
@@ -463,12 +470,15 @@ def main():
                          'ACC/acc_unlab': prec_unlab.item(),
                          'ACC/acc_unlab_adv': prec_unlab_adv.item(),
                          'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
+                         'pesudo/prec_label': prec_pesudo_label.item(),
+                         'pesudo/prec_strong': prec_pesudo_strong.item(),
+                         'pesudo/prec_adv': prec_pesudo_adv.item(),
                          'mask': mask.mean().item(),
                          'epsilon': wandb.Histogram(epsilon.cpu().detach().numpy()),
                          'epsilon_mean': epsilon.mean().item(),
                          'lr': optimizer.param_groups[0]['lr']})
-            if batch_idx == 1 and args.local_rank in [-1, 0]:
-                reconst_images(x_prior, inputs_u_s, run)
+                if batch_idx == 1:
+                    reconst_images(x_prior, inputs_u_s, run)
             losses_x.update(l_ce.item())
             losses_u.update(l_cs.item())
             losses_adv.update(l_adv.item())
