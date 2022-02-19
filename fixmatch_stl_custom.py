@@ -294,7 +294,7 @@ def main():
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, args.warmup, args.total_steps)
     ### init eps bank
-    epsilon = torch.zeros(len(unlabeled_dataset)+len(labeled_dataset), requires_grad=False).to(args.device) + args.start
+    epsilon = Variable(torch.zeros(len(unlabeled_dataset)+len(labeled_dataset), requires_grad=False).to(args.device) + args.start)
     if args.use_ema:
         from models.ema import ModelEMA
         ema_model = ModelEMA(args, model, args.ema_decay)
@@ -422,15 +422,16 @@ def main():
                 if args.world_size > 1:
                     targets_u_all = torch.cat(GatherLayer.apply(targets_u), dim=0)
                     targets_adv_all = torch.cat(GatherLayer.apply(targets_adv), dim=0)
-                    index = torch.cat(GatherLayer.apply(index), dim=0)
+                    index_all = torch.cat(GatherLayer.apply(index), dim=0)
                     mask_all = torch.cat(GatherLayer.apply(mask), dim=0)
                 else:
                     targets_u_all = targets_u
                     targets_adv_all = targets_adv
-                    index = index
-            change = targets_adv_all.eq(targets_u_all).float()
-            add_index = (change + mask_all).eq(2)
-            epsilon[index][add_index] = epsilon[index][add_index] + args.step
+                    mask_all = mask
+                    index_all = index
+            unchange = targets_adv_all.eq(targets_u_all).float()
+            add_index = (unchange + mask_all).eq(2).float()
+            epsilon[index_all] += args.step*add_index
             epsilon = torch.clamp(epsilon, max=args.eps_max)
 
             logits_adv, feat_adv = model(x_prior.detach(), adv=True, return_feature=True)
