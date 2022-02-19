@@ -17,8 +17,8 @@ from torch.utils.data.distributed import DistributedSampler
 from apex.parallel import DistributedDataParallel as DDP
 from apex.parallel import convert_syncbn_model
 from tqdm import tqdm
-
-from dataset.cifar import DATASET_GETTERS
+import torch.distributed as dist
+from dataset.cifar_index import DATASET_GETTERS
 from utils import AverageMeter, accuracy, setup_logger
 
 import models
@@ -30,6 +30,24 @@ from typing import List, Optional, Tuple, Union, cast
 
 logger = logging.getLogger(__name__)
 best_acc = 0
+
+
+class GatherLayer(torch.autograd.Function):
+    """Gather tensors from all process, supporting backward propagation."""
+
+    @staticmethod
+    def forward(ctx, input):
+        ctx.save_for_backward(input)
+        output = [torch.zeros_like(input) for _ in range(dist.get_world_size())]
+        dist.all_gather(output, input)
+        return tuple(output)
+
+    @staticmethod
+    def backward(ctx, *grads):
+        (input,) = ctx.saved_tensors
+        grad_out = torch.zeros_like(input)
+        grad_out[:] = grads[dist.get_rank()]
+        return grad_out
 
 
 def reconst_images(x_adv, strong_x, run):
@@ -150,10 +168,9 @@ def main():
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
     parser.add_argument('--dim', default=512, type=int, help='CNN_embed_dim')
-    parser.add_argument('--eps', default=0.5, type=float, help='eps for adversarial')
-    parser.add_argument('--alpha', default=1.0, type=float, help='alpha for adversarial')
-    parser.add_argument('--gamma', default=1.0, type=float, help='alpha for adversarial')
-    parser.add_argument('--beta', default=1.0, type=float, help='alpha for adversarial')
+    parser.add_argument('--start', default=0.0, type=float, help='eps for adversarial')
+    parser.add_argument('--step', default=0.02, type=float, help='eps for adversarial')
+    parser.add_argument('--eps_max', default=0.25, type=float, help='eps for adversarial')
     args = parser.parse_args()
     global best_acc
 
@@ -276,7 +293,8 @@ def main():
     args.epochs = math.ceil(args.total_steps / args.eval_step)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, args.warmup, args.total_steps)
-
+    ### init eps bank
+    epsilon = torch.zeros(len(unlabeled_dataset)+len(labeled_dataset), requires_grad=False).to(args.device) + args.start
     if args.use_ema:
         from models.ema import ModelEMA
         ema_model = ModelEMA(args, model, args.ema_decay)
@@ -328,91 +346,6 @@ def main():
     labeled_iter = iter(labeled_trainloader)
     unlabeled_iter = iter(unlabeled_trainloader)
 
-    def run_iter(
-            inputs_x_w: torch.Tensor,
-            targets_x: torch.Tensor,
-            inputs_u_w: torch.Tensor,
-            inputs_u_s: torch.Tensor,
-            targets_ux: torch.Tensor,
-            batch_idx,
-    ):
-        model.train()
-        all_x = torch.cat((inputs_x_w, inputs_u_w, inputs_u_s)).to(args.device)
-        inputs_u_w = inputs_u_w.to(args.device)
-        inputs_u_s = inputs_u_s.to(args.device)
-        targets_x = targets_x.to(args.device)
-        targets_ux = targets_ux.to(args.device)
-        batch_size = inputs_x_w.size(0)
-
-        optimizer.zero_grad()
-
-        with torch.no_grad():
-            logits_u_w, feat_u_w = model(inputs_u_w, adv=True, return_feature=True)
-            pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
-            max_probs, targets_u = torch.max(pseudo_label, dim=-1)
-        x_prior = Variable(inputs_u_s.detach(), requires_grad=True)
-        logits_adv, feat_adv = model(x_prior, adv=True, return_feature=True)
-        pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
-        ce = F.cross_entropy(logits_adv, targets_u)
-
-        loss_tmp = args.beta * pip - args.gamma * ce
-        if args.amp:
-            with amp.scale_loss(loss_tmp, optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            loss_tmp.backward()
-        with torch.no_grad():
-            sign_grad = x_prior.grad.data.sign()
-            x_prior = x_prior + args.eps * sign_grad
-            x_prior.detach()
-
-        logits = model(all_x)
-        logits_x = logits[:batch_size]
-        logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
-        del logits
-
-        l_ce = F.cross_entropy(logits_x, targets_x, reduction='mean')
-
-        pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
-        max_probs, targets_u = torch.max(pseudo_label, dim=-1)
-        mask = max_probs.ge(args.threshold).float()
-        l_cs = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
-
-        logits_adv, feat_adv = model(x_prior.detach(), adv=True, return_feature=True)
-        pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
-        ce_after = F.cross_entropy(logits_adv, targets_u)
-        l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
-        loss = l_ce + l_cs + args.alpha * l_adv
-        optimizer.zero_grad()
-        if args.amp:
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            loss.backward()
-        optimizer.step()
-
-        prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
-        prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
-        prec_unlab_adv, _ = accuracy(logits_adv.data, targets_ux.data, topk=(1, 5))
-        prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
-        if args.local_rank in [-1, 0]:
-            run.log({'l_cs': l_cs.data.item(),
-                     'l_ce': l_ce.data.item(),
-                     'l_adv': l_adv.data.item(),
-                     'pip': pip.data.item(),
-                     'ce': ce.data.item(),
-                     'pip_after': pip_after.data.item(),
-                     'ce_after': ce_after.data.item(),
-                     'ACC/acc': prec.item(),
-                     'ACC/acc_unlab': prec_unlab.item(),
-                     'ACC/acc_unlab_adv': prec_unlab_adv.item(),
-                     'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
-                     'mask': mask.mean().item(),
-                     'lr': optimizer.param_groups[0]['lr']})
-        if batch_idx == 1 and args.local_rank in [-1, 0]:
-            reconst_images(x_prior, inputs_u_s, run)
-        return l_cs, l_ce, l_adv, mask
-
     for epoch in range(args.start_epoch, args.epochs):
         batch_time = AverageMeter()
         data_time = AverageMeter()
@@ -425,25 +358,116 @@ def main():
                          disable=args.local_rank not in [-1, 0])
         for batch_idx in range(args.eval_step):
             try:
-                inputs_x_w, targets_x = labeled_iter.next()
+                inputs_x_w, targets_x, _ = labeled_iter.next()
             except:
                 if args.world_size > 1:
                     labeled_epoch += 1
                     labeled_trainloader.sampler.set_epoch(labeled_epoch)
                 labeled_iter = iter(labeled_trainloader)
-                inputs_x_w, targets_x = labeled_iter.next()
+                inputs_x_w, targets_x, _ = labeled_iter.next()
 
             try:
-                (inputs_u_w, inputs_u_s), targets_ux = unlabeled_iter.next()
+                (inputs_u_w, inputs_u_s), targets_ux, index = unlabeled_iter.next()
             except:
                 if args.world_size > 1:
                     unlabeled_epoch += 1
                     unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
                 unlabeled_iter = iter(unlabeled_trainloader)
-                (inputs_u_w, inputs_u_s), targets_ux = unlabeled_iter.next()
+                (inputs_u_w, inputs_u_s), targets_ux, index = unlabeled_iter.next()
 
             data_time.update(time.time() - end)
-            l_ce, l_cs, l_adv, mask = run_iter(inputs_x_w, targets_x, inputs_u_w, inputs_u_s, targets_ux, batch_idx)
+            model.train()
+            all_x = torch.cat((inputs_x_w, inputs_u_w, inputs_u_s)).to(args.device)
+            inputs_u_s = inputs_u_s.to(args.device)
+            targets_x = targets_x.to(args.device)
+            targets_ux = targets_ux.to(args.device)
+            index = index.to(args.device)
+            batch_size = inputs_x_w.size(0)
+
+            optimizer.zero_grad()
+
+            logits, feat = model(all_x, return_feature=True)
+            logits_x = logits[:batch_size]
+            feat_u_w = tuple(x[batch_size:8 * batch_size].detach() for x in feat)
+            logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
+            del logits, feat
+
+            l_ce = F.cross_entropy(logits_x, targets_x, reduction='mean')
+
+            pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
+            max_probs, targets_u = torch.max(pseudo_label, dim=-1)
+            mask = max_probs.ge(args.threshold).float()
+            l_cs = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
+
+            ##CDAA
+            x_prior = Variable(inputs_u_s.detach(), requires_grad=True)
+            logits_adv, feat_adv = model(x_prior, adv=True, return_feature=True)
+            pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
+            ce = F.cross_entropy(logits_adv, targets_u)
+
+            loss_tmp = pip
+            if args.amp:
+                with amp.scale_loss(loss_tmp, optimizer) as scaled_loss:
+                    scaled_loss.backward(retain_graph=True)
+            else:
+                loss_tmp.backward(retain_graph=True)
+
+            with torch.no_grad():
+                eps = epsilon[index] + args.step
+                eps = eps.reshape(eps.size(0), 1, 1, 1)
+                sign_grad = x_prior.grad.data.sign()
+                x_prior = x_prior + eps * sign_grad
+                x_prior.detach()
+                _, targets_adv = torch.max(logits_adv, 1)
+                if args.world_size > 1:
+                    targets_u_all = torch.cat(GatherLayer.apply(targets_u), dim=0)
+                    targets_adv_all = torch.cat(GatherLayer.apply(targets_adv), dim=0)
+                    index = torch.cat(GatherLayer.apply(index), dim=0)
+                    mask_all = torch.cat(GatherLayer.apply(mask), dim=0)
+                else:
+                    targets_u_all = targets_u
+                    targets_adv_all = targets_adv
+                    index = index
+            change = targets_adv_all.eq(targets_u_all).float()
+            add_index = (change + mask_all).eq(2)
+            epsilon[index][add_index] = epsilon[index][add_index] + args.step
+            epsilon = torch.clamp(epsilon, max=args.eps_max)
+
+            logits_adv, feat_adv = model(x_prior.detach(), adv=True, return_feature=True)
+            pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
+            ce_after = F.cross_entropy(logits_adv, targets_u)
+            l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
+            loss = l_ce + l_cs + l_adv
+            optimizer.zero_grad()
+            if args.amp:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+            optimizer.step()
+
+            prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
+            prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
+            prec_unlab_adv, _ = accuracy(logits_adv.data, targets_ux.data, topk=(1, 5))
+            prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
+            if args.local_rank in [-1, 0]:
+                run.log({'l_cs': l_cs.data.item(),
+                         'l_ce': l_ce.data.item(),
+                         'l_adv': l_adv.data.item(),
+                         'pip': pip.data.item(),
+                         'ce': ce.data.item(),
+                         'pip_after': pip_after.data.item(),
+                         'ce_after': ce_after.data.item(),
+                         'ACC/acc': prec.item(),
+                         'ACC/acc_unlab': prec_unlab.item(),
+                         'ACC/acc_unlab_adv': prec_unlab_adv.item(),
+                         'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
+                         'mask': mask.mean().item(),
+                         'epsilon': wandb.Histogram(epsilon.cpu().detach().numpy()),
+                         'epsilon_mean': epsilon.mean().item(),
+                         'lr': optimizer.param_groups[0]['lr']})
+            if batch_idx == 1 and args.local_rank in [-1, 0]:
+                reconst_images(x_prior, inputs_u_s, run)
             losses_x.update(l_ce.item())
             losses_u.update(l_cs.item())
             losses_adv.update(l_adv.item())

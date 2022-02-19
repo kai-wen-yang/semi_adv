@@ -292,7 +292,6 @@ def main():
             [model, vae], optimizer, opt_level=args.opt_level)
 
     if args.local_rank != -1:
-        model = convert_syncbn_model(model)
         model = DDP(model, delay_allreduce=True)
         vae = DDP(vae, delay_allreduce=True)
 
@@ -344,6 +343,7 @@ def main():
         logits_adv = model(x_prior, adv=True)
         mse = F.mse_loss(inputs_u_w.detach(), gx)
         ce = F.cross_entropy(logits_adv, targets_u)
+
         loss_tmp = args.beta * mse - args.gamma * ce
         if args.amp:
             with amp.scale_loss(loss_tmp, optimizer) as scaled_loss:
@@ -365,7 +365,6 @@ def main():
         pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
         max_probs, targets_u = torch.max(pseudo_label, dim=-1)
         mask = max_probs.ge(args.threshold).float()
-
         l_cs = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
 
         logits_adv = model(x_prior.detach(), adv=True)

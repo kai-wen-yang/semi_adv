@@ -14,6 +14,8 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+from apex.parallel import DistributedDataParallel as DDP
+from apex.parallel import convert_syncbn_model
 from tqdm import tqdm
 from models.wide_resnet import *
 from dataset.cifar import DATASET_GETTERS
@@ -283,6 +285,8 @@ def main():
             model, optimizer, opt_level=args.opt_level)
 
     if args.local_rank != -1:
+        #model = convert_syncbn_model(model)
+        #model = DDP(model, delay_allreduce=True)
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank],
             output_device=args.local_rank, find_unused_parameters=True)
@@ -351,14 +355,14 @@ def main():
         prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
         prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
         prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
-
-        run.log({'l_cs': l_cs.data.item(),
-                 'l_ce': l_ce.data.item(),
-                 'ACC/acc': prec.item(),
-                 'ACC/acc_unlab': prec_unlab.item(),
-                 'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
-                 'mask': mask.mean().item(),
-                 'lr': optimizer.param_groups[0]['lr']})
+        if args.local_rank in [-1, 0]:
+            run.log({'l_cs': l_cs.data.item(),
+                     'l_ce': l_ce.data.item(),
+                     'ACC/acc': prec.item(),
+                     'ACC/acc_unlab': prec_unlab.item(),
+                     'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
+                     'mask': mask.mean().item(),
+                     'lr': optimizer.param_groups[0]['lr']})
 
         return l_cs, l_ce, mask
 

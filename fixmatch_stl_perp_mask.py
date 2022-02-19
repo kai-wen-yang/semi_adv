@@ -350,10 +350,11 @@ def main():
             logits_u_w, feat_u_w = model(inputs_u_w, adv=True, return_feature=True)
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
+            mask = max_probs.ge(args.threshold).float()
         x_prior = Variable(inputs_u_s.detach(), requires_grad=True)
         logits_adv, feat_adv = model(x_prior, adv=True, return_feature=True)
         pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
-        ce = F.cross_entropy(logits_adv, targets_u)
+        ce = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
 
         loss_tmp = args.beta * pip - args.gamma * ce
         if args.amp:
