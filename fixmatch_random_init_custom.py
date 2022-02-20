@@ -18,7 +18,7 @@ from apex.parallel import DistributedDataParallel as DDP
 from apex.parallel import convert_syncbn_model
 from tqdm import tqdm
 import torch.distributed as dist
-from dataset.cifar_index import DATASET_GETTERS
+from dataset.cifar_index import DATASET_GETTERS, mu_cifar100, std_cifar100, clamp
 from utils import AverageMeter, accuracy, setup_logger
 
 import models
@@ -280,7 +280,8 @@ def main():
         torch.distributed.barrier()
 
     model.to(args.device)
-
+    upper_limit = ((1 - mu_cifar100) / std_cifar100).to(args.device)
+    lower_limit = ((0 - mu_cifar100) / std_cifar100).to(args.device)
     no_decay = ['bias', 'bn']
     grouped_parameters = [
         {'params': [p for n, p in model.named_parameters() if not any(
@@ -378,10 +379,10 @@ def main():
             data_time.update(time.time() - end)
             model.train()
             all_x = torch.cat((inputs_x_w, inputs_u_w, inputs_u_s)).to(args.device)
-            inputs_u_s = inputs_u_s.to(args.device)
             targets_x = targets_x.to(args.device)
             targets_ux = targets_ux.to(args.device)
             index = index.to(args.device)
+            inputs_u_w = inputs_u_w.to(args.device)
             batch_size = inputs_x_w.size(0)
 
             optimizer.zero_grad()
@@ -401,8 +402,15 @@ def main():
             l_cs = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
 
             ##CDAA
-            x_prior = Variable(inputs_u_s.detach(), requires_grad=True)
-            logits_adv, feat_adv = model(x_prior, adv=True, return_feature=True)
+            eps = epsilon[index] + args.step # bs
+            eps = eps.reshape(eps.size(0), 1, 1, 1) # bs, 1, 1, 1
+            delta = torch.zeros_like(inputs_u_w.detach()).to(args.device)
+            delta.uniform_(-1, 1) # bs, 3, 32, 32
+            delta = delta * eps
+            delta.data = clamp(delta, lower_limit - inputs_u_w, upper_limit - inputs_u_w)
+
+            delta.requires_grad = True
+            logits_adv, feat_adv = model(inputs_u_w+delta, adv=True, return_feature=True)
             pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(dim=1).mean()
             ce = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
 
@@ -413,14 +421,13 @@ def main():
             else:
                 loss_tmp.backward(retain_graph=True)
 
-            with torch.no_grad():
-                eps = epsilon[index] + args.step
-                eps = eps.reshape(eps.size(0), 1, 1, 1)
-                sign_grad = x_prior.grad.data.sign()
-                x_prior = x_prior + eps * sign_grad
-                x_prior.detach()
+            grad = delta.grad.detach()
+            delta.data = clamp(delta + 1.25 * eps * torch.sign(grad), -eps, eps)
+            delta.data = clamp(delta, lower_limit - inputs_u_w, upper_limit - inputs_u_w)
+            delta = delta.detach()
+            ##
 
-            logits_adv, feat_adv = model(x_prior.detach(), adv=True, return_feature=True)
+            logits_adv, feat_adv = model(inputs_u_w+delta, adv=True, return_feature=True)
             l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
             loss = l_ce + l_cs + l_adv
 
@@ -432,10 +439,8 @@ def main():
                 loss.backward()
             optimizer.step()
 
+            ## adjust epsilon
             with torch.no_grad():
-                pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(
-                    dim=1).mean()
-                ce_after = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
                 _, targets_adv = torch.max(logits_adv, 1)
                 if args.world_size > 1:
                     targets_u_all = torch.cat(GatherLayer.apply(targets_u), dim=0)
@@ -452,14 +457,17 @@ def main():
                 epsilon[index_all] += args.step*add_index
                 epsilon = torch.clamp(epsilon, max=args.eps_max)
 
+                pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_u_w)).norm(
+                    dim=1).mean()
+                ce_after = (F.cross_entropy(logits_adv, targets_u, reduction='none') * mask).mean()
+            ##
+
             prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
             prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
             prec_unlab_adv, _ = accuracy(logits_adv.data, targets_ux.data, topk=(1, 5))
             prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
-            _, targets_u_s = torch.max(logits_u_s, 1)
 
             prec_pesudo_label = (targets_u == targets_ux).float()[max_probs.ge(args.threshold)].mean()
-            prec_pesudo_strong = (targets_u == targets_u_s).float()[max_probs.ge(args.threshold)].mean()
             prec_pesudo_adv = (targets_u == targets_adv).float()[max_probs.ge(args.threshold)].mean()
             if args.local_rank in [-1, 0]:
                 run.log({'l_cs': l_cs.data.item(),
@@ -474,14 +482,15 @@ def main():
                          'ACC/acc_unlab_adv': prec_unlab_adv.item(),
                          'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
                          'pesudo/prec_label': prec_pesudo_label.item(),
-                         'pesudo/prec_strong': prec_pesudo_strong.item(),
                          'pesudo/prec_adv': prec_pesudo_adv.item(),
                          'mask': mask.mean().item(),
                          'epsilon': wandb.Histogram(epsilon.cpu().detach().numpy()),
                          'epsilon_mean': epsilon.mean().item(),
+                         'epsilon_selected': wandb.Histogram(eps[max_probs.ge(args.threshold)].cpu().detach().numpy()),
+                         'epsilon_mean_selected': eps[max_probs.ge(args.threshold)].mean().item(),
                          'lr': optimizer.param_groups[0]['lr']})
                 if batch_idx == 1:
-                    reconst_images(x_prior, inputs_u_s, run)
+                    reconst_images(inputs_u_w+delta, inputs_u_w, run)
             losses_x.update(l_ce.item())
             losses_u.update(l_cs.item())
             losses_adv.update(l_adv.item())

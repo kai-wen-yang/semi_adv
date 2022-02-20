@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 from torchvision import datasets
 from torchvision import transforms
-
+import torch
 from .randaugment import RandAugmentMC
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,16 @@ stl10_mean = (0.4408, 0.4279, 0.3867)
 stl10_std = (0.2682, 0.2610, 0.2686)
 normal_mean = (0.5, 0.5, 0.5)
 normal_std = (0.5, 0.5, 0.5)
+
+mu_cifar100 = torch.tensor(cifar100_mean).view(3,1,1)
+std_cifar100 = torch.tensor(cifar100_std).view(3,1,1)
+
+upper_limit = ((1 - mu_cifar100)/ std_cifar100)
+lower_limit = ((0 - mu_cifar100)/ std_cifar100)
+
+
+def clamp(X, lower_limit, upper_limit):
+    return torch.max(torch.min(X, upper_limit), lower_limit)
 
 
 def get_stl10(args, root):
