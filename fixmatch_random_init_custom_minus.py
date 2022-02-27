@@ -507,6 +507,9 @@ def main():
                                  'Adv/epsilon_mean': epsilon.mean().item(),
                                  'Adv/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
                                  'Adv/epsilon_mean_selected': eps.mean().item(),
+                                 'Adv/ce_ori': l_ce_ori[mask_index].mean().item(),
+                                 'Adv/ce_ori_his': wandb.Histogram(l_ce_ori[mask_index].cpu().detach().numpy(), num_bins=512),
+                                 'Adv/ce_after_his': wandb.Histogram(l_adv_ori.cpu().detach().numpy(), num_bins=512),
                                  'lr': optimizer.param_groups[0]['lr']})
                         if batch_idx == 1:
                             reconst_images(input_selected + delta, input_selected, run)
