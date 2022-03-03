@@ -418,11 +418,13 @@ def main():
 
             if args.world_size > 1:
                 mask_all = torch.cat(GatherLayer.apply(mask), dim=0)
-                mask1, mask2 = mask_all.chunk(2)
+                mask1, mask2, mask3, mask4 = mask_all.chunk(4)
             else:
                 mask1 = mask
                 mask2 = mask
-            if mask1.sum() == 0 or mask2.sum() == 0 or epoch <= args.warmup_adv:
+                mask3 = mask
+                mask4 = mask
+            if mask1.sum() == 0 or mask2.sum() == 0 or mask3.sum() == 0 or mask4.sum() == 0 or epoch <= args.warmup_adv:
                 loss = l_ce + l_cs
                 with torch.no_grad():
                     prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
@@ -473,8 +475,8 @@ def main():
                 l_adv = l_adv_ori.mean()
                 loss = l_ce + l_cs + l_adv
 
-                unchange = torch.abs(l_adv_ori - l_ce_ori[mask_index]) <= args.eps
-                change = torch.abs(l_adv_ori - l_ce_ori[mask_index]) > args.eps
+                unchange = torch.abs(l_adv_ori - ce_ori) <= args.eps
+                change = torch.abs(l_adv_ori - ce_ori) > args.eps
                 # unchange = targets_adv.eq(targets_selected).float()
                 # change = targets_adv.ne(targets_selected).float()
                 update[mask_index] += args.step * unchange
