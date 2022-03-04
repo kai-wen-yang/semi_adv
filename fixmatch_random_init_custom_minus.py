@@ -393,6 +393,7 @@ def main():
             targets_ux = targets_ux.to(args.device)
             index = index.to(args.device)
             inputs_u_w = inputs_u_w.to(args.device)
+            inputs_u_s = inputs_u_s.to(args.device)
             batch_size = inputs_x_w.size(0)
 
             optimizer.zero_grad()
@@ -408,11 +409,12 @@ def main():
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
             mask = max_probs.ge(args.threshold).float()
             mask_index = max_probs.ge(args.threshold)
-            l_ce_ori = F.cross_entropy(logits_u_s, targets_u, reduction='none')
-            l_cs = (l_ce_ori * mask).mean()
+            ce_s = F.cross_entropy(logits_u_s, targets_u, reduction='none')
+            l_cs = (ce_s * mask).mean()
 
             index_selected = index[mask_index]
-            input_selected = inputs_u_w[mask_index]
+            input_selected = inputs_u_s[mask_index]
+            input_selected_w = inputs_u_w[mask_index]
             targets_selected = targets_u[mask_index]
             update = torch.zeros(inputs_u_w.size(0)).to(args.device)
 
@@ -451,9 +453,10 @@ def main():
                 delta.data = clamp(delta, lower_limit - input_selected, upper_limit - input_selected)
                 delta.requires_grad = True
 
-                logits_selected, feat_selected = model(input_selected, adv=True, return_feature=True)
-                ce_ori = F.cross_entropy(logits_selected, targets_selected, reduction='none')
-                ce = ce_ori.mean()
+                with torch.no_grad():
+                    logits_selected, feat_selected = model(input_selected_w, return_feature=True)
+                    ce_w = F.cross_entropy(logits_selected, targets_selected, reduction='none')
+                    l_ce_w = ce_w.mean()
                 for _ in range(args.attack_iters):
                     _, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
                     pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_selected).detach()).norm(dim=1).mean()
@@ -471,20 +474,18 @@ def main():
                 ##
                 logits_adv, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
                 _, targets_adv = torch.max(logits_selected, 1)
-                l_adv_ori = F.cross_entropy(logits_adv, targets_selected, reduction='none')
-                l_adv = l_adv_ori.mean()
+                ce_adv = F.cross_entropy(logits_adv, targets_selected, reduction='none')
+                l_adv = ce_adv.mean()
                 loss = l_ce + l_cs + l_adv
 
-                unchange = torch.abs(l_adv_ori - ce_ori) <= args.eps
-                change = torch.abs(l_adv_ori - ce_ori) > args.eps
+                unchange = torch.abs(ce_adv - ce_w) <= args.eps
+                change = torch.abs(ce_adv - ce_w) > args.eps
                 # unchange = targets_adv.eq(targets_selected).float()
                 # change = targets_adv.ne(targets_selected).float()
                 update[mask_index] += args.step * unchange
                 update[mask_index] -= args.step * change
-
                 with torch.no_grad():
                     pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_selected).detach()).norm(dim=1).mean()
-                    ce_after = F.cross_entropy(logits_adv, targets_selected)
                     prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
                     prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
                     prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
@@ -496,22 +497,24 @@ def main():
                                  'loss/l_ce': l_ce.data.item(),
                                  'loss/l_adv': l_adv.data.item(),
                                  'Adv/pip': pip.data.item(),
-                                 'Adv/ce': ce.data.item(),
+                                 'Adv/ce_w': l_ce_w.data.item(),
+                                 'Adv/ce_adv': l_adv.data.item(),
+                                 'Adv/ce_s': ce_s[mask_index].mean().item(),
+                                 'His/ce_w': wandb.Histogram(ce_w.cpu().detach().numpy(), num_bins=512),
+                                 'His/ce_adv': wandb.Histogram(ce_adv.cpu().detach().numpy(), num_bins=512),
+                                 'His/ce_s': wandb.Histogram(ce_s[mask_index].cpu().detach().numpy(), num_bins=512),
+                                 'His/ce_delta': wandb.Histogram((ce_adv-ce_s[mask_index]).cpu().detach().numpy(), num_bins=512),
                                  'Adv/pip_after': pip_after.data.item(),
-                                 'Adv/ce_after': ce_after.data.item(),
                                  'ACC/acc': prec.item(),
                                  'ACC/acc_unlab': prec_unlab.item(),
                                  'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
                                  'pesudo/prec_label': prec_pesudo_label.item(),
                                  'pesudo/prec_adv': prec_pesudo_adv.item(),
                                  'mask': mask.mean().item(),
-                                 'Adv/epsilon': wandb.Histogram(epsilon.cpu().detach().numpy(), num_bins=512),
+                                 'His/epsilon': wandb.Histogram(epsilon.cpu().detach().numpy(), num_bins=512),
                                  'Adv/epsilon_mean': epsilon.mean().item(),
-                                 'Adv/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
+                                 'His/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
                                  'Adv/epsilon_mean_selected': eps.mean().item(),
-                                 'Adv/ce_ori': l_ce_ori[mask_index].mean().item(),
-                                 'Adv/ce_ori_his': wandb.Histogram(l_ce_ori[mask_index].cpu().detach().numpy(), num_bins=512),
-                                 'Adv/ce_after_his': wandb.Histogram(l_adv_ori.cpu().detach().numpy(), num_bins=512),
                                  'lr': optimizer.param_groups[0]['lr']})
                         if batch_idx == 1:
                             reconst_images(input_selected + delta, input_selected, run)
