@@ -478,13 +478,12 @@ def main():
                 l_adv = ce_adv.mean()
                 loss = l_ce + l_cs + l_adv
 
-                unchange = torch.abs(ce_adv - ce_w) <= args.eps
-                change = torch.abs(ce_adv - ce_w) > args.eps
-                # unchange = targets_adv.eq(targets_selected).float()
-                # change = targets_adv.ne(targets_selected).float()
-                update[mask_index] += args.step * unchange
-                update[mask_index] -= args.step * change
                 with torch.no_grad():
+                    unchange = torch.abs(ce_adv - ce_w) <= args.eps
+                    change = torch.abs(ce_adv - ce_w) > args.eps
+                    update[mask_index] += args.step * unchange
+                    update[mask_index] -= args.step * change
+                    
                     pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_selected).detach()).norm(dim=1).mean()
                     prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
                     prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
