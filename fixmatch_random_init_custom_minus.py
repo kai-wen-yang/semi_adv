@@ -413,8 +413,7 @@ def main():
             l_cs = (ce_s * mask).mean()
 
             index_selected = index[mask_index]
-            input_selected = inputs_u_s[mask_index]
-            input_selected_w = inputs_u_w[mask_index]
+            input_selected = inputs_u_w[mask_index]
             targets_selected = targets_u[mask_index]
             update = torch.zeros(inputs_u_w.size(0)).to(args.device)
 
@@ -454,7 +453,7 @@ def main():
                 delta.requires_grad = True
 
                 with torch.no_grad():
-                    logits_selected, feat_selected = model(input_selected_w, return_feature=True)
+                    logits_selected, feat_selected = model(input_selected, return_feature=True)
                     ce_w = F.cross_entropy(logits_selected, targets_selected, reduction='none')
                     l_ce_w = ce_w.mean()
                 for _ in range(args.attack_iters):
