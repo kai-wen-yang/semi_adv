@@ -452,7 +452,7 @@ def main():
                 for _ in range(args.attack_iters):
                     logits_adv, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
                     pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_selected).detach()).norm(dim=1).mean()
-                    ce = F.cross_entropy(logits_adv, targets_selected, reduction='none')
+                    ce = F.cross_entropy(logits_adv, targets_selected)
                     loss_tmp = pip - args.ce * ce
                     if args.amp:
                         with amp.scale_loss(loss_tmp, optimizer) as scaled_loss:
