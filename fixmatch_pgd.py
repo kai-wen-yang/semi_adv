@@ -181,7 +181,7 @@ def main():
     parser.add_argument('--warmup_adv', default=5, type=int, help='warm up epoch')
     parser.add_argument('--attack-iters', default=7, type=int, help='Attack iterations')
     parser.add_argument('--step', default=0.02, type=float, help='eps for adversarial')
-    parser.add_argument('--eps', default=0.4, type=float, help='eps for adversarial')
+    parser.add_argument('--ce', default=1, type=float, help='eps for adversarial')
     args = parser.parse_args()
     global best_acc
 
@@ -450,13 +450,15 @@ def main():
                     logits_selected, feat_selected = model(input_selected, return_feature=True)
                     y_w = torch.gather(torch.softmax(logits_selected, dim=-1), 1, targets_selected.view(-1, 1)).squeeze(dim=1)
                 for _ in range(args.attack_iters):
-                    _, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
+                    logits_adv, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
                     pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_selected).detach()).norm(dim=1).mean()
+                    ce = F.cross_entropy(logits_adv, targets_selected, reduction='none')
+                    loss_tmp = pip - args.ce * ce
                     if args.amp:
-                        with amp.scale_loss(pip, optimizer) as scaled_loss:
+                        with amp.scale_loss(loss_tmp, optimizer) as scaled_loss:
                             scaled_loss.backward(retain_graph=True)
                     else:
-                        pip.backward(retain_graph=True)
+                        loss_tmp.backward(retain_graph=True)
 
                     grad = delta.grad.detach()
                     delta.data = clamp(delta + alpha * torch.sign(grad), -eps, eps)
