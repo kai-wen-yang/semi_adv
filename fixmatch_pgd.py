@@ -325,7 +325,6 @@ def main():
             ema_model.ema.load_state_dict(checkpoint['ema_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
-        epsilon = checkpoint['epsilon']
     if args.amp:
         from apex import amp
         model, optimizer = amp.initialize(
@@ -461,7 +460,7 @@ def main():
                         loss_tmp.backward(retain_graph=True)
 
                     grad = delta.grad.detach()
-                    delta.data = clamp(delta + alpha * torch.sign(grad), -eps, eps)
+                    delta.data = torch.clamp(delta + alpha * torch.sign(grad), -eps, eps)
                     delta.data = clamp(delta, lower_limit - input_selected, upper_limit - input_selected)
                     delta.grad.zero_()
                 delta = delta.detach()
@@ -563,7 +562,6 @@ def main():
                 'best_acc': best_acc,
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
-                'epsilon': epsilon
             }, is_best, args.out)
 
             test_accs.append(test_acc)
