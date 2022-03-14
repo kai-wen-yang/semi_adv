@@ -176,6 +176,8 @@ def main():
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
     parser.add_argument('--dim', default=512, type=int, help='CNN_embed_dim')
+    parser.add_argument('--T_adv', default=5, type=float,
+                        help='pseudo label temperature')
     parser.add_argument('--warmup_adv', default=5, type=int, help='warm up epoch')
     parser.add_argument('--attack-iters', default=7, type=int, help='Attack iterations')
     parser.add_argument('--start', default=0.0, type=float, help='eps for adversarial')
@@ -306,7 +308,7 @@ def main():
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, args.warmup, args.total_steps)
     ### init eps bank
-    epsilon = Variable(torch.zeros(len(unlabeled_dataset)+len(labeled_dataset), requires_grad=False).to(args.device) + args.start)
+    epsilon = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device) + args.start)
     if args.use_ema:
         from models.ema import ModelEMA
         ema_model = ModelEMA(args, model, args.ema_decay)
@@ -326,7 +328,7 @@ def main():
             ema_model.ema.load_state_dict(checkpoint['ema_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
-
+        epsilon = checkpoint['epsilon']
     if args.amp:
         from apex import amp
         model, optimizer = amp.initialize(
@@ -393,7 +395,6 @@ def main():
             targets_ux = targets_ux.to(args.device)
             index = index.to(args.device)
             inputs_u_w = inputs_u_w.to(args.device)
-            inputs_u_s = inputs_u_s.to(args.device)
             batch_size = inputs_x_w.size(0)
 
             optimizer.zero_grad()
@@ -419,12 +420,13 @@ def main():
 
             if args.world_size > 1:
                 mask_all = torch.cat(GatherLayer.apply(mask), dim=0)
-                mask1, mask2 = mask_all.chunk(2)
+                mask1, mask2, mask3, mask4 = mask_all.chunk(4)
             else:
                 mask1 = mask
                 mask2 = mask
-
-            if mask1.sum() == 0 or mask2.sum() == 0 or epoch <= args.warmup_adv:
+                mask3 = mask
+                mask4 = mask
+            if mask1.sum() == 0 or mask2.sum() == 0 or mask3.sum() == 0 or mask4.sum() == 0 or epoch <= args.warmup_adv:
                 loss = l_ce + l_cs
                 with torch.no_grad():
                     prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
@@ -453,8 +455,7 @@ def main():
 
                 with torch.no_grad():
                     logits_selected, feat_selected = model(input_selected, return_feature=True)
-                    ce_w = F.cross_entropy(logits_selected, targets_selected, reduction='none')
-                    l_ce_w = ce_w.mean()
+                    y_w = torch.gather(torch.softmax(logits_selected, dim=-1), 1, targets_selected.view(-1, 1)).squeeze(dim=1)
                 for _ in range(args.attack_iters):
                     _, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
                     pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_selected).detach()).norm(dim=1).mean()
@@ -471,22 +472,23 @@ def main():
                 delta = delta.detach()
                 ##
                 logits_adv, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
-                _, targets_adv = torch.max(logits_adv, 1)
-                ce_adv = F.cross_entropy(logits_adv, targets_selected, reduction='none')
-                l_adv = ce_adv.mean()
+                _, targets_adv = torch.max(logits_selected, 1)
+                y_adv = torch.gather(torch.softmax(logits_adv, dim=-1), 1, targets_selected.view(-1, 1)).squeeze(dim=1)
+                #####
+                eps_reshape = eps.reshape(eps.size(0))
+
+                selection = (eps_reshape<=1000).float()
+
+                l_adv = (F.cross_entropy(logits_adv, targets_selected, reduction='none')*selection).mean()
+
                 loss = l_ce + l_cs + l_adv
 
-                if args.local_rank in [-1, 0]:
-                    pdb.set_trace()
                 with torch.no_grad():
-                    soft_logits_adv = torch.softmax(logits_adv.detach(), dim=-1)
-                    soft_logits_selected = torch.softmax(logits_selected.detach(), dim=-1)
-                    unchange = torch.norm(soft_logits_selected - soft_logits_adv, p=1, dim=1) <= args.eps
-                    change = torch.norm(soft_logits_selected - soft_logits_adv, p=1, dim=1) > args.eps
+                    unchange = torch.abs(y_adv - y_w) <= args.eps
+                    change = torch.abs(y_adv - y_w) > args.eps
                     update[mask_index] += args.step * unchange
                     update[mask_index] -= args.step * change
-                    
-                    pip_after = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_selected).detach()).norm(dim=1).mean()
+
                     prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
                     prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
                     prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
@@ -497,29 +499,22 @@ def main():
                         run.log({'loss/l_cs': l_cs.data.item(),
                                  'loss/l_ce': l_ce.data.item(),
                                  'loss/l_adv': l_adv.data.item(),
-                                 'Adv/pip': pip.data.item(),
-                                 'Adv/ce_w': l_ce_w.data.item(),
-                                 'Adv/ce_adv': l_adv.data.item(),
-                                 'Adv/ce_s': ce_s[mask_index].mean().item(),
-                                 'His/ce_w': wandb.Histogram(ce_w.cpu().detach().numpy(), num_bins=512),
-                                 'His/ce_adv': wandb.Histogram(ce_adv.cpu().detach().numpy(), num_bins=512),
-                                 'His/ce_s': wandb.Histogram(ce_s[mask_index].cpu().detach().numpy(), num_bins=512),
-                                 'His/logits_delta': wandb.Histogram((torch.norm(soft_logits_selected - soft_logits_adv, p=1, dim=1)).cpu().detach().numpy(), num_bins=512),
-                                 'Adv/pip_after': pip_after.data.item(),
+                                 'Adv/y_w': y_w.mean().data.item(),
+                                 'Adv/y_adv': y_adv.mean().data.item(),
+                                 'Adv/epsilon_mean_selected': eps.mean().item(),
+                                 'His/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
+                                 'His/y_w': wandb.Histogram(y_w.cpu().detach().numpy(), num_bins=512),
+                                 'His/y_adv': wandb.Histogram(y_adv.cpu().detach().numpy(), num_bins=512),
+                                 'His/y_delta': wandb.Histogram((y_adv-y_w).cpu().detach().numpy(), num_bins=512),
                                  'ACC/acc': prec.item(),
                                  'ACC/acc_unlab': prec_unlab.item(),
                                  'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
                                  'pesudo/prec_label': prec_pesudo_label.item(),
                                  'pesudo/prec_adv': prec_pesudo_adv.item(),
                                  'mask': mask.mean().item(),
-                                 'His/epsilon': wandb.Histogram(epsilon.cpu().detach().numpy(), num_bins=512),
-                                 'Adv/epsilon_mean': epsilon.mean().item(),
-                                 'His/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
-                                 'Adv/epsilon_mean_selected': eps.mean().item(),
                                  'lr': optimizer.param_groups[0]['lr']})
                         if batch_idx == 1:
                             reconst_images(input_selected + delta, input_selected, run)
-            torch.distributed.barrier()
 
             optimizer.zero_grad()
             if args.amp:
@@ -594,6 +589,7 @@ def main():
                 'best_acc': best_acc,
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
+                'epsilon': epsilon
             }, is_best, args.out)
 
             test_accs.append(test_acc)
