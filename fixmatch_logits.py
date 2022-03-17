@@ -309,6 +309,7 @@ def main():
         optimizer, args.warmup, args.total_steps)
     ### init eps bank
     epsilon = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device) + args.start)
+    random_index = np.random.randint(len(unlabeled_dataset), size=10)
     if args.use_ema:
         from models.ema import ModelEMA
         ema_model = ModelEMA(args, model, args.ema_decay)
@@ -433,14 +434,15 @@ def main():
                     prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
                     prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
 
-                    if args.local_rank in [-1, 0]:
-                        run.log({'loss/l_cs': l_cs.data.item(),
-                                 'loss/l_ce': l_ce.data.item(),
-                                 'ACC/acc': prec.item(),
-                                 'ACC/acc_unlab': prec_unlab.item(),
-                                 'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
-                                 'mask': mask.mean().item(),
-                                 'lr': optimizer.param_groups[0]['lr']})
+                    if batch_idx % 10 == 0:
+                        if args.local_rank in [-1, 0]:
+                            run.log({'loss/l_cs': l_cs.data.item(),
+                                     'loss/l_ce': l_ce.data.item(),
+                                     'ACC/acc': prec.item(),
+                                     'ACC/acc_unlab': prec_unlab.item(),
+                                     'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
+                                     'mask': mask.mean().item(),
+                                     'lr': optimizer.param_groups[0]['lr']})
             else:
                 ##CDAA
                 #random init
@@ -455,7 +457,7 @@ def main():
 
                 with torch.no_grad():
                     logits_selected, feat_selected = model(input_selected, return_feature=True)
-                    y_w = torch.gather(torch.softmax(logits_selected, dim=-1), 1, targets_selected.view(-1, 1)).squeeze(dim=1)
+                    y_w = torch.gather(torch.softmax(logits_selected / args.T_adv, dim=-1), 1, targets_selected.view(-1, 1)).squeeze(dim=1)
                 for _ in range(args.attack_iters):
                     _, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
                     pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_selected).detach()).norm(dim=1).mean()
@@ -472,20 +474,18 @@ def main():
                 delta = delta.detach()
                 ##
                 logits_adv, feat_adv = model(input_selected + delta, adv=True, return_feature=True)
-                _, targets_adv = torch.max(logits_selected, 1)
-                y_adv = torch.gather(torch.softmax(logits_adv, dim=-1), 1, targets_selected.view(-1, 1)).squeeze(dim=1)
+                _, targets_adv = torch.max(logits_adv, 1)
+                y_adv = torch.gather(torch.softmax(logits_adv/args.T_adv, dim=-1), 1, targets_selected.view(-1, 1)).squeeze(dim=1)
                 #####
                 eps_reshape = eps.reshape(eps.size(0))
-
                 selection = (eps_reshape<=1000).float()
-
                 l_adv = (F.cross_entropy(logits_adv, targets_selected, reduction='none')*selection).mean()
 
                 loss = l_ce + l_cs + l_adv
 
                 with torch.no_grad():
-                    unchange = torch.abs(y_adv - y_w) <= args.eps
-                    change = torch.abs(y_adv - y_w) > args.eps
+                    unchange = (y_w - y_adv) <= args.eps
+                    change = (y_w - y_adv) > args.eps
                     update[mask_index] += args.step * unchange
                     update[mask_index] -= args.step * change
 
@@ -495,26 +495,25 @@ def main():
 
                     prec_pesudo_label = (targets_u == targets_ux).float()[max_probs.ge(args.threshold)].mean()
                     prec_pesudo_adv = (targets_selected == targets_adv).float().mean()
-                    if args.local_rank in [-1, 0]:
-                        run.log({'loss/l_cs': l_cs.data.item(),
-                                 'loss/l_ce': l_ce.data.item(),
-                                 'loss/l_adv': l_adv.data.item(),
-                                 'Adv/y_w': y_w.mean().data.item(),
-                                 'Adv/y_adv': y_adv.mean().data.item(),
-                                 'Adv/epsilon_mean_selected': eps.mean().item(),
-                                 'His/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
-                                 'His/y_w': wandb.Histogram(y_w.cpu().detach().numpy(), num_bins=512),
-                                 'His/y_adv': wandb.Histogram(y_adv.cpu().detach().numpy(), num_bins=512),
-                                 'His/y_delta': wandb.Histogram((y_adv-y_w).cpu().detach().numpy(), num_bins=512),
-                                 'ACC/acc': prec.item(),
-                                 'ACC/acc_unlab': prec_unlab.item(),
-                                 'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
-                                 'pesudo/prec_label': prec_pesudo_label.item(),
-                                 'pesudo/prec_adv': prec_pesudo_adv.item(),
-                                 'mask': mask.mean().item(),
-                                 'lr': optimizer.param_groups[0]['lr']})
-                        if batch_idx == 1:
-                            reconst_images(input_selected + delta, input_selected, run)
+                    if batch_idx % 10 == 0:
+                        if args.local_rank in [-1, 0]:
+                            run.log({'loss/l_cs': l_cs.data.item(),
+                                     'loss/l_ce': l_ce.data.item(),
+                                     'loss/l_adv': l_adv.data.item(),
+                                     'Adv/y_w': y_w.mean().data.item(),
+                                     'Adv/y_adv': y_adv.mean().data.item(),
+                                     'Adv/epsilon_mean_selected': eps.mean().item(),
+                                     'His/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
+                                     'His/y_w': wandb.Histogram(y_w.cpu().detach().numpy(), num_bins=512),
+                                     'His/y_adv': wandb.Histogram(y_adv.cpu().detach().numpy(), num_bins=512),
+                                     'His/y_delta': wandb.Histogram((y_adv-y_w).cpu().detach().numpy(), num_bins=512),
+                                     'ACC/acc': prec.item(),
+                                     'ACC/acc_unlab': prec_unlab.item(),
+                                     'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
+                                     'pesudo/prec_label': prec_pesudo_label.item(),
+                                     'pesudo/prec_adv': prec_pesudo_adv.item(),
+                                     'mask': mask.mean().item(),
+                                     'lr': optimizer.param_groups[0]['lr']})
 
             optimizer.zero_grad()
             if args.amp:
@@ -573,6 +572,8 @@ def main():
             test_loss, test_acc = test(args, test_loader, test_model, epoch)
             run.log({'test/1.test_acc': test_acc,
                          'test/2.test_loss': test_loss})
+            for i in random_index:
+                run.log({'random_index_{index}'.format(index=i):epsilon[i].item()})
 
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)
