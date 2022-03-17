@@ -573,7 +573,7 @@ def main():
             run.log({'test/1.test_acc': test_acc,
                          'test/2.test_loss': test_loss})
             for i in random_index:
-                run.log({'random_index_{index}'.format(index=i):epsilon[i].item()})
+                run.log({'random_index_{index}/epsilon'.format(index=i):epsilon[i].item()})
 
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)
