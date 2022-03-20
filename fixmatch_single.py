@@ -304,7 +304,7 @@ def main():
     epsilon = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device) + args.start)
     all_w = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device))
     pesudo_predict = Variable(torch.zeros(len(unlabeled_dataset), dtype=torch.int64, requires_grad=False).to(args.device))
-    mem_logits = Variable(torch.zeros([len(unlabeled_dataset), 100], dtype=torch.int64, requires_grad=False).to(args.device))
+    mem_logits = Variable(torch.zeros([len(unlabeled_dataset), 100], requires_grad=False).to(args.device))
     mem_tc = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device))
     k = 0.1
     threshold = 1
