@@ -381,7 +381,6 @@ def main():
             try:
                 (inputs_u_w, inputs_u_s), targets_ux, index = unlabeled_iter.next()
             except:
-                pdb.set_trace()
                 k = k * (1 + 0.005)
                 _, indices = torch.sort(mem_tc, descending=True)
                 threshold = mem_tc[indices[int(k*len(unlabeled_dataset))]]
