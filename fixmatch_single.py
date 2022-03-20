@@ -150,7 +150,7 @@ def main():
                         help='coefficient of unlabeled loss')
     parser.add_argument('--T', default=1, type=float,
                         help='pseudo label temperature')
-    parser.add_argument('--threshold', default=0.5, type=float,
+    parser.add_argument('--threshold', default=0.95, type=float,
                         help='pseudo label threshold')
     parser.add_argument('--out', default='result',
                         help='directory to output the result')
@@ -417,7 +417,6 @@ def main():
             del logits
 
             l_ce = F.cross_entropy(logits_x, targets_x, reduction='mean')
-
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
             mask = (max_probs.ge(args.threshold)).float()
