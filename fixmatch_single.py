@@ -20,7 +20,7 @@ from tqdm import tqdm
 import torch.distributed as dist
 from dataset.cifar_index import DATASET_GETTERS, mu_cifar100, std_cifar100, clamp
 from utils import AverageMeter, accuracy, setup_logger
-
+import random
 import models
 import pdb
 import math
@@ -387,9 +387,9 @@ def main():
                 if args.local_rank in [-1, 0]:
                     run.log({'k': k,
                              'threshold': threshold}, commit=False)
-                    if epoch == 20:
+                    if epoch == 2:
                         random_index = indices[:10]
-                    if epoch > 20:
+                    if epoch > 2:
                         for i in random_index:
                             run.log({'random_index_{index}/epsilon'.format(index=i): epsilon[i].item()}, commit=False)
                             run.log({'random_index_{index}/logits_u_w'.format(index=i): all_w[i].item()}, commit=False)
@@ -423,7 +423,7 @@ def main():
             mask_tc = (mem_tc[index].ge(threshold)).float()
             ce_s = F.cross_entropy(logits_u_s, targets_u, reduction='none')
             l_cs = (ce_s * mask).mean()
-            at = F.kl_div(mem_logits[index], logits_u_w, reduction='none').mean(dim=1)
+            at = F.kl_div(mem_logits[index], pseudo_label, reduction='none').mean(dim=1)
             update = torch.zeros(inputs_u_w.size(0)).to(args.device)
 
             ##CDAA
@@ -506,7 +506,6 @@ def main():
             else:
                 loss.backward()
             optimizer.step()
-
             ## adjust epsilon
             with torch.no_grad():
                 logits_w_y = torch.gather(torch.softmax(logits_u_w, dim=-1), 1, targets_u.view(-1, 1)).squeeze(dim=1)
@@ -514,20 +513,20 @@ def main():
                     index_all = torch.cat(GatherLayer.apply(index), dim=0)
                     update_all = torch.cat(GatherLayer.apply(update), dim=0)
                     logits_w_y_all = torch.cat(GatherLayer.apply(logits_w_y), dim=0)
-                    logits_u_w_all = torch.cat(GatherLayer.apply(logits_u_w), dim=0)
+                    logits_u_w_all = torch.cat(GatherLayer.apply(pseudo_label), dim=0)
                     at_all = torch.cat(GatherLayer.apply(at), dim=0)
                     targets_u_all = torch.cat(GatherLayer.apply(targets_u), dim=0)
                 else:
                     index_all = index
                     update_all = update
                     logits_w_y_all = logits_w_y
-                    logits_u_w_all = logits_u_w
+                    logits_u_w_all = pseudo_label
                     at_all = at
                     targets_u_all = targets_u
                 epsilon[index_all] += update_all
                 all_w[index_all] = logits_w_y_all
                 pesudo_predict[index_all] = targets_u_all
-                mem_tc[index_all] = 0.99 * mem_tc[index_all] - 0.01 * at_all
+                mem_tc[index_all] = 0.01 * mem_tc[index_all] - 0.99 * at_all
                 mem_logits[index_all] = logits_u_w_all
                 epsilon = torch.clamp(epsilon, min=0, max=args.eps_max)
             ##
