@@ -304,7 +304,7 @@ def main():
     epsilon = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device) + args.start)
     all_w = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device))
     pesudo_predict = Variable(torch.zeros(len(unlabeled_dataset), dtype=torch.int64, requires_grad=False).to(args.device))
-    mem_logits = Variable(torch.zeros([len(unlabeled_dataset), 100], requires_grad=False).to(args.device))
+    mem_logits = Variable(torch.ones([len(unlabeled_dataset), 100], dtype=torch.int64, requires_grad=False).to(args.device) + 0.01)
     mem_tc = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device))
     k = 0.1
     threshold = 1
@@ -423,7 +423,7 @@ def main():
             mask_tc = (mem_tc[index].ge(threshold)).float()
             ce_s = F.cross_entropy(logits_u_s, targets_u, reduction='none')
             l_cs = (ce_s * mask).mean()
-            at = F.kl_div(mem_logits[index], pseudo_label, reduction='none').mean(dim=1)
+            at = F.kl_div(mem_logits[index].log(), pseudo_label, reduction='none').mean(dim=1)
             update = torch.zeros(inputs_u_w.size(0)).to(args.device)
 
             ##CDAA
