@@ -453,12 +453,12 @@ def main():
             else:
                 loss = l_ce + l_cs + l_adv
 
-            with torch.no_grad():
                 unchange = (y_w - y_adv) <= args.eps
                 change = (y_w - y_adv) > args.eps
                 update += (args.step * unchange)
                 update -= (args.step * change)
 
+            with torch.no_grad():
                 prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
                 prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
                 prec_unlab_strong, _ = accuracy(logits_u_s.data, targets_ux.data, topk=(1, 5))
