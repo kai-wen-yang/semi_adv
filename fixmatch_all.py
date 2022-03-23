@@ -472,6 +472,8 @@ def main():
                                  'loss/l_adv': l_adv.data.item(),
                                  'Adv/y_w': y_w.mean().data.item(),
                                  'Adv/y_adv': y_adv.mean().data.item(),
+                                 'Adv/epsilon_mean_selected': eps.mean().item(),
+                                 'His/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
                                  'His/y_w': wandb.Histogram(y_w.cpu().detach().numpy(), num_bins=512),
                                  'His/y_adv': wandb.Histogram(y_adv.cpu().detach().numpy(), num_bins=512),
                                  'His/y_delta': wandb.Histogram((y_adv-y_w).cpu().detach().numpy(), num_bins=512),
@@ -506,6 +508,7 @@ def main():
                 epsilon[index_all] += update_all
                 all_w[index_all] = logits_w_y_all
                 pesudo_predict[index_all] = targets_u_all
+                epsilon = torch.clamp(epsilon, min=0, max=args.eps_max)
             ##
             losses_x.update(l_ce.item())
             losses_u.update(l_cs.item())
