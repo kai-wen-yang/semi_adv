@@ -428,19 +428,19 @@ def main():
             with torch.no_grad():
                 logits_ori, feat_ori = model(inputs_u_w, return_feature=True)
                 y_w = torch.gather(torch.softmax(logits_ori / args.T_adv, dim=-1), 1, targets_u.view(-1, 1)).squeeze(dim=1)
-            for _ in range(args.attack_iters):
-                _, feat_adv = model(inputs_u_w + delta, adv=True, return_feature=True)
-                pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_ori).detach()).norm(dim=1).mean()
-                if args.amp:
-                    with amp.scale_loss(pip, optimizer) as scaled_loss:
-                        scaled_loss.backward(retain_graph=True)
-                else:
-                    pip.backward(retain_graph=True)
 
-                grad = delta.grad.detach()
-                delta.data = clamp(delta + alpha * torch.sign(grad), -eps, eps)
-                delta.data = clamp(delta, lower_limit - inputs_u_w, upper_limit - inputs_u_w)
-                delta.grad.zero_()
+            _, feat_adv = model(inputs_u_w + delta, adv=True, return_feature=True)
+            pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_ori).detach()).norm(dim=1).mean()
+            if args.amp:
+                with amp.scale_loss(pip, optimizer) as scaled_loss:
+                    scaled_loss.backward(retain_graph=True)
+            else:
+                pip.backward(retain_graph=True)
+
+            grad = delta.grad.detach()
+            delta.data = clamp(delta + alpha * torch.sign(grad), -eps, eps)
+            delta.data = clamp(delta, lower_limit - inputs_u_w, upper_limit - inputs_u_w)
+            delta.grad.zero_()
             delta = delta.detach()
             ##
             logits_adv, feat_adv = model(inputs_u_w + delta, adv=True, return_feature=True)
