@@ -168,13 +168,11 @@ def main():
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
     parser.add_argument('--dim', default=512, type=int, help='CNN_embed_dim')
-    parser.add_argument('--T_adv', default=5, type=float,
-                        help='pseudo label temperature')
     parser.add_argument('--warmup_adv', default=5, type=int, help='warm up epoch')
-    parser.add_argument('--attack-iters', default=7, type=int, help='Attack iterations')
     parser.add_argument('--start', default=0.0, type=float, help='eps for adversarial')
-    parser.add_argument('--step', default=0.02, type=float, help='eps for adversarial')
-    parser.add_argument('--eps', default=0.4, type=float, help='eps for adversarial')
+    parser.add_argument('--step', default=0.01, type=float, help='eps for adversarial')
+    parser.add_argument('--sigmma', default=0.01, type=float, help='eps for adversarial')
+    parser.add_argument('--gammak', default=0.005, type=float, help='eps for adversarial')
     parser.add_argument('--eps_max', default=0.25, type=float, help='eps for adversarial')
     args = parser.parse_args()
     global best_acc
@@ -304,10 +302,10 @@ def main():
     epsilon = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device) + args.start)
     all_w = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device))
     pesudo_predict = Variable(torch.zeros(len(unlabeled_dataset), dtype=torch.int64, requires_grad=False).to(args.device))
-    mem_logits = Variable(torch.ones([len(unlabeled_dataset), 100], dtype=torch.int64, requires_grad=False).to(args.device) + 0.01)
+    mem_logits = Variable(torch.zeros([len(unlabeled_dataset), 100], dtype=torch.int64, requires_grad=False).to(args.device) + 0.01)
     mem_tc = Variable(torch.zeros(len(unlabeled_dataset), requires_grad=False).to(args.device))
     k = 0.1
-    threshold = 1
+    threshold = 0
     if args.use_ema:
         from models.ema import ModelEMA
         ema_model = ModelEMA(args, model, args.ema_decay)
@@ -381,9 +379,10 @@ def main():
             try:
                 (inputs_u_w, inputs_u_s), targets_ux, index = unlabeled_iter.next()
             except:
-                k = k * (1 + 0.005)
+                k = k * (1 + args.gammak)
                 _, indices = torch.sort(mem_tc, descending=True)
-                threshold = mem_tc[indices[int(k*len(unlabeled_dataset))]]
+                kt = min(len(unlabeled_dataset), k*len(unlabeled_dataset))
+                threshold = mem_tc[indices[int(kt)]]
                 if args.local_rank in [-1, 0]:
                     run.log({'k': k,
                              'threshold': threshold}, commit=False)
@@ -420,6 +419,7 @@ def main():
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
             mask = (max_probs.ge(args.threshold)).float()
+            pdb.set_trace()
             mask_tc = (mem_tc[index].ge(threshold)).float()
             ce_s = F.cross_entropy(logits_u_s, targets_u, reduction='none')
             l_cs = (ce_s * mask).mean()
@@ -430,7 +430,7 @@ def main():
             #random init
             eps = epsilon[index] + args.step # bs
             eps = eps.reshape(eps.size(0), 1, 1, 1) # bs, 1, 1, 1
-            alpha = eps / 4
+            alpha = 1.25 * eps
             delta = torch.zeros_like(inputs_u_w.detach()).to(args.device)
             delta.uniform_(-1, 1) # bs, 3, 32, 32
             delta = delta * eps
@@ -439,7 +439,7 @@ def main():
             # pgd attack
             with torch.no_grad():
                 logits_ori, feat_ori = model(inputs_u_w, return_feature=True)
-                y_w = torch.gather(torch.softmax(logits_ori / args.T_adv, dim=-1), 1, targets_u.view(-1, 1)).squeeze(dim=1)
+                y_w = torch.softmax(logits_ori / args.T, dim=-1)
 
             _, feat_adv = model(inputs_u_w + delta, adv=True, return_feature=True)
             pip = (normalize_flatten_features(feat_adv) - normalize_flatten_features(feat_ori).detach()).norm(dim=1).mean()
@@ -457,19 +457,19 @@ def main():
             ##
             logits_adv, feat_adv = model(inputs_u_w + delta, adv=True, return_feature=True)
             _, targets_adv = torch.max(logits_adv, 1)
-            y_adv = torch.gather(torch.softmax(logits_adv/args.T_adv, dim=-1), 1, targets_u.view(-1, 1)).squeeze(dim=1)
+            y_adv = torch.softmax(logits_adv / args.T, dim=-1)
             l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none')*mask_tc).mean()
-
+            criterion = F.kl_div(y_w.log(), y_adv, reduction='none').mean(dim=1) + F.kl_div(y_adv.log(), y_w, reduction='none').mean(dim=1)
             if epoch <= args.warmup_adv:
                 loss = l_ce + l_cs
             else:
                 loss = l_ce + l_cs + l_adv
-
-            with torch.no_grad():
-                unchange = (y_w - y_adv) <= args.eps
-                change = (y_w - y_adv) > args.eps
+                unchange = criterion <= args.sigmma
+                change = criterion > args.sigmma
                 update += (args.step * unchange) * mask_tc
                 update -= (args.step * change) * mask_tc
+
+            with torch.no_grad():
 
                 prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
                 prec_unlab, _ = accuracy(logits_u_w.data, targets_ux.data, topk=(1, 5))
@@ -482,14 +482,12 @@ def main():
                         run.log({'loss/l_cs': l_cs.data.item(),
                                  'loss/l_ce': l_ce.data.item(),
                                  'loss/l_adv': l_adv.data.item(),
-                                 'Adv/y_w': y_w.mean().data.item(),
-                                 'Adv/y_adv': y_adv.mean().data.item(),
                                  'Adv/epsilon_mean_selected': eps.mean().item(),
                                  'Adv/mem_tc': mem_tc.mean().item(),
+                                 'Adv/criterion': criterion.mean().item(),
+                                 'His/mem_tc': wandb.Histogram(mem_tc.cpu().detach().numpy(), num_bins=512),
                                  'His/epsilon_selected': wandb.Histogram(eps.cpu().detach().numpy(), num_bins=512),
-                                 'His/y_w': wandb.Histogram(y_w.cpu().detach().numpy(), num_bins=512),
-                                 'His/y_adv': wandb.Histogram(y_adv.cpu().detach().numpy(), num_bins=512),
-                                 'His/y_delta': wandb.Histogram((y_adv-y_w).cpu().detach().numpy(), num_bins=512),
+                                 'His/criterion': wandb.Histogram(criterion.cpu().detach().numpy(), num_bins=512),
                                  'ACC/acc': prec.item(),
                                  'ACC/acc_unlab': prec_unlab.item(),
                                  'ACC/acc_unlab_strongaug': prec_unlab_strong.item(),
