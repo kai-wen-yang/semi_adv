@@ -419,8 +419,8 @@ def main():
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
             mask = (max_probs.ge(args.threshold)).float()
-            pdb.set_trace()
-            mask_tc = (mem_tc[index].ge(threshold)).float()
+
+            mask_tc = (mem_tc[index].gt(threshold)).float()
             ce_s = F.cross_entropy(logits_u_s, targets_u, reduction='none')
             l_cs = (ce_s * mask).mean()
             at = F.kl_div(mem_logits[index].log(), pseudo_label, reduction='none').mean(dim=1)
