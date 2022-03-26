@@ -454,8 +454,8 @@ def main():
                 loss = l_ce + l_cs + l_adv
                 unchange = criterion <= args.sigmma
                 change = criterion > args.sigmma
-                update += (args.step * unchange) * mask_tc
-                update -= (args.step * change) * mask_tc
+                update += (args.step * unchange)
+                update -= (args.step * change)
 
             with torch.no_grad():
                 prec, _ = accuracy(logits_x.data, targets_x.data, topk=(1, 5))
