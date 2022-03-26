@@ -381,7 +381,7 @@ def main():
             except:
                 k = k * (1 + args.gammak)
                 _, indices = torch.sort(mem_tc, descending=True)
-                kt = min(len(unlabeled_dataset), k*len(unlabeled_dataset))
+                kt = min(len(unlabeled_dataset)-1, k*len(unlabeled_dataset))
                 mem_tc_copy = copy.deepcopy(mem_tc)
                 threshold = mem_tc_copy[indices[int(kt)]]
                 if args.local_rank in [-1, 0]:
