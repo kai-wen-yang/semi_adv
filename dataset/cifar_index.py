@@ -23,6 +23,8 @@ normal_std = (0.5, 0.5, 0.5)
 
 mu_cifar100 = torch.tensor(cifar100_mean).view(3,1,1)
 std_cifar100 = torch.tensor(cifar100_std).view(3,1,1)
+mu_cifar10 = torch.tensor(cifar10_mean).view(3,1,1)
+std_cifar10 = torch.tensor(cifar10_std).view(3,1,1)
 
 upper_limit = ((1 - mu_cifar100)/ std_cifar100)
 lower_limit = ((0 - mu_cifar100)/ std_cifar100)
@@ -109,7 +111,6 @@ def get_cifar100(args, root):
 
     base_dataset = datasets.CIFAR100(
         root, train=True, download=True)
-
     train_labeled_idxs, train_unlabeled_idxs = x_u_split(
         args, base_dataset.targets)
 
