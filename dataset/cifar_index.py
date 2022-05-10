@@ -7,7 +7,7 @@ from torchvision import datasets
 from torchvision import transforms
 import torch
 from .randaugment import RandAugmentMC
-
+from typing import List, Optional, Tuple, Union, cast
 import pdb
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,8 @@ mu_cifar100 = torch.tensor(cifar100_mean).view(3,1,1)
 std_cifar100 = torch.tensor(cifar100_std).view(3,1,1)
 mu_cifar10 = torch.tensor(cifar10_mean).view(3,1,1)
 std_cifar10 = torch.tensor(cifar10_std).view(3,1,1)
+mu_stl10 = torch.tensor(stl10_mean).view(3,1,1)
+std_stl10 = torch.tensor(stl10_std).view(3,1,1)
 
 upper_limit = ((1 - mu_cifar100)/ std_cifar100)
 lower_limit = ((0 - mu_cifar100)/ std_cifar100)
@@ -48,11 +50,11 @@ def get_stl10(args, root):
         transforms.Normalize(mean=stl10_mean, std=stl10_std)
     ])
 
-    train_labeled_dataset = datasets.STL10(
+    train_labeled_dataset = STL10SSL(
         root, split='train', download=True,
         transform=transform_labeled)
 
-    train_unlabeled_dataset = datasets.STL10(
+    train_unlabeled_dataset = STL10SSL(
         root, split='unlabeled',
         transform=TransformFixMatch_stl(mean=stl10_mean, std=stl10_std))
 
@@ -61,6 +63,7 @@ def get_stl10(args, root):
         transform=transform_val)
 
     return train_labeled_dataset, train_unlabeled_dataset, test_dataset
+
 
 
 def get_cifar10(args, root):
@@ -243,6 +246,41 @@ class TransformFixMatch_stl(object):
         weak = self.weak(x)
         strong = self.strong(x)
         return self.normalize(weak), self.normalize(strong)
+
+
+class STL10SSL(datasets.STL10):
+    def __init__(self, root, split,
+                 transform=None,
+                 download=False):
+        super().__init__(root, split=split,
+                         transform=transform,
+                         download=download)
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        target: Optional[int]
+        if self.labels is not None:
+            img, target = self.data[index], int(self.labels[index])
+        else:
+            img, target = self.data[index], None
+
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = Image.fromarray(np.transpose(img, (1, 2, 0)))
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target, index
 
 
 DATASET_GETTERS = {'cifar10': get_cifar10,

@@ -18,7 +18,7 @@ from apex.parallel import DistributedDataParallel as DDP
 from apex.parallel import convert_syncbn_model
 from tqdm import tqdm
 import torch.distributed as dist
-from dataset.cifar_index import DATASET_GETTERS, mu_cifar100, std_cifar100, clamp
+from dataset.cifar_index import DATASET_GETTERS, mu_cifar100, std_cifar100, mu_stl10, std_stl10, clamp
 from utils import AverageMeter, accuracy, setup_logger
 import random
 import models
@@ -70,7 +70,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'cifar100'],
+                        choices=['cifar10', 'cifar100', 'stl10'],
                         help='dataset name')
     parser.add_argument('--num-labeled', type=int, default=4000,
                         help='number of labeled data')
@@ -191,6 +191,11 @@ def main():
         if args.arch == 'wideresnet':
             args.model_depth = 28
             args.model_width = 8
+    elif args.dataset == 'stl10':
+        args.num_classes = 10
+        if args.arch == 'wideresnet':
+            args.model_depth = 28
+            args.model_width = 2
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
