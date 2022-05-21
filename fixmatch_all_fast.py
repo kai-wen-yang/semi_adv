@@ -236,6 +236,8 @@ def main():
     parser.add_argument('--lam', default=0.1, type=float, help='bound for adversarial')
     parser.add_argument("--teacher_path", type=str,
                         default='/gdata2/yangkw/semi_adv/results/cifar100_supervise/0290.ckpt.pth')
+    parser.add_argument('--generate_adv', default=10, type=int,
+                        help='coefficient of unlabeled batch size')
     args = parser.parse_args()
     global best_acc
 
@@ -459,7 +461,7 @@ def main():
             index = index.to(args.device)
             batch_size = inputs_x_w.size(0)
 
-            if unlabeled_epoch % 10 == 0:
+            if unlabeled_epoch % args.generate_adv == 0:
                 with torch.no_grad():
                     logits_ori, feat_ori = model(inputs_u_w, adv=True, return_feature=True)
                     _, targets_uadv = torch.max(logits_ori, 1)
@@ -537,7 +539,10 @@ def main():
                 loss.backward()
             optimizer.step()
 
-            if unlabeled_epoch % 10 == 0:
+            if batch_idx%100==0:
+                reconst_images(inputs_adv, inputs_u_w,run)
+
+            if unlabeled_epoch % args.generate_adv == 0:
                 print('update adv')
                 with torch.no_grad():
                     if args.world_size > 1:
@@ -547,7 +552,7 @@ def main():
                         index_all = index
                         inputs_adv_all = inputs_adv
                     adv_loader[index_all.cpu()] = copy.deepcopy(inputs_adv_all).cpu()
-            reconst_images(inputs_adv, inputs_u_w, run)
+
             losses_x.update(l_ce.item())
             losses_u.update(l_cs.item())
             mask_probs.update(mask.mean().item())
