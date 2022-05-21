@@ -547,7 +547,7 @@ def main():
                         index_all = index
                         inputs_adv_all = inputs_adv
                     adv_loader[index_all.cpu()] = copy.deepcopy(inputs_adv_all).cpu()
-
+            reconst_images(inputs_adv, inputs_u_w, run)
             losses_x.update(l_ce.item())
             losses_u.update(l_cs.item())
             mask_probs.update(mask.mean().item())
@@ -586,7 +586,6 @@ def main():
             test_loss, test_acc = test(args, test_loader, test_model, epoch)
             run.log({'test/1.test_acc': test_acc,
                          'test/2.test_loss': test_loss})
-            #reconst_images(inputs_adv, inputs_u_w, run, mask_1, mask_2, mask_3)
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)
 
