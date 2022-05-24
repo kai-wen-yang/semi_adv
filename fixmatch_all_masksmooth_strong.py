@@ -230,10 +230,12 @@ def main():
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
     parser.add_argument('--warmup_adv', default=5, type=int, help='warm up epoch')
-    parser.add_argument('--eps', default=0.03, type=float, help='bound for adversarial')
+    parser.add_argument('--bound', default=0.1, type=float, help='bound for adversarial')
+    parser.add_argument('--portion', default=0.1, type=float, help='bound for adversarial')
+    parser.add_argument('--num_iterations', default=5, type=int, help='eps for adversarial')
+    parser.add_argument('--lam', default=0.1, type=float, help='bound for adversarial')
     parser.add_argument("--teacher_path", type=str,
                         default='/gdata2/yangkw/semi_adv/results/cifar100_supervise/0290.ckpt.pth')
-    parser.add_argument('--portion', default=0.1, type=float, help='bound for adversarial')
     args = parser.parse_args()
     global best_acc
 
