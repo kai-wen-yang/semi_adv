@@ -230,12 +230,10 @@ def main():
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
     parser.add_argument('--warmup_adv', default=5, type=int, help='warm up epoch')
-    parser.add_argument('--bound', default=0.1, type=float, help='bound for adversarial')
-    parser.add_argument('--portion', default=0.1, type=float, help='bound for adversarial')
-    parser.add_argument('--num_iterations', default=5, type=int, help='eps for adversarial')
-    parser.add_argument('--lam', default=0.1, type=float, help='bound for adversarial')
+    parser.add_argument('--eps', default=0.03, type=float, help='bound for adversarial')
     parser.add_argument("--teacher_path", type=str,
                         default='/gdata2/yangkw/semi_adv/results/cifar100_supervise/0290.ckpt.pth')
+    parser.add_argument('--portion', default=0.1, type=float, help='bound for adversarial')
     args = parser.parse_args()
     global best_acc
 
@@ -471,24 +469,13 @@ def main():
             with torch.no_grad():
                 logits_ori, feat_ori = model(inputs_u_w, adv=True, return_feature=True)
                 _, targets_uadv = torch.max(logits_ori, 1)
-                flat_feat_ori = normalize_flatten_features(feat_ori)
                 prob = torch.softmax(logits_ori / args.T, dim=-1)
                 y_w = torch.log(torch.gather(prob, 1, targets_uadv.view(-1, 1)).squeeze(dim=1))
                 at = F.kl_div(mem_logits[index].log(), prob, reduction='none').mean(dim=1)
-                mask_smooth = (mem_tc[index]).lt(threshold)
 
-            if args.world_size > 1:
-                mask_smooth_all = torch.cat(GatherLayer.apply(mask_smooth), dim=0)
-                run_adv = all(_.sum() > 0 for _ in mask_smooth_all.chunk(args.world_size))
-                train_adv = run_adv and epoch > args.warmup_adv
-            else:
-                run_adv = mask_smooth.sum() > 0
-                train_adv = run_adv and epoch > args.warmup_adv
-
-            if run_adv:
-                inputs_adv = get_attack(model, inputs_u_s[mask_smooth], targets_uadv[mask_smooth], \
-                                        y_w[mask_smooth], flat_feat_ori[mask_smooth], args)
-                optimizer.zero_grad()
+            inputs_adv = get_attack(model, inputs_u_w, targets_uadv, \
+                                    y_w, normalize_flatten_features(feat_ori), args)
+            optimizer.zero_grad()
 
             logits, feats = model(all_x, return_feature=True)
             logits_x = logits[:batch_size]
@@ -501,19 +488,19 @@ def main():
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
             mask = (max_probs.ge(args.threshold)).float()
-            mask_1 = max_probs[mask_smooth].ge(args.our_threshold)
+            mask_1 = (max_probs.ge(args.our_threshold)) & ((mem_tc[index]).lt(threshold))
 
             l_cs = (F.cross_entropy(logits_u_s, targets_u, reduction='none')* mask).mean()
             _, targets_s = torch.max(logits_u_s, 1)
             ##
-            if run_adv:
-                logits_adv, feat_adv = model(inputs_adv, adv=True, return_feature=True)
-                _, targets_adv = torch.max(logits_adv, 1)
-                prob_adv = torch.softmax(logits_adv / args.T, dim=-1)
-                y_adv = torch.log(torch.gather(prob_adv, 1, targets_u[mask_smooth].view(-1, 1)).squeeze(dim=1))
-                l_adv = (F.cross_entropy(logits_adv, targets_u[mask_smooth], reduction='none')[mask_1]).mean()
 
-            if train_adv:
+            logits_adv, feat_adv = model(inputs_adv, adv=True, return_feature=True)
+            _, targets_adv = torch.max(logits_adv, 1)
+            prob_adv = torch.softmax(logits_adv / args.T, dim=-1)
+            y_adv = torch.log(torch.gather(prob_adv, 1, targets_u.view(-1, 1)).squeeze(dim=1))
+            l_adv = (F.cross_entropy(logits_adv, targets_u, reduction='none')[mask_1]).mean()
+
+            if epoch>=args.warmup_adv:
                 loss = l_ce + l_cs + l_adv
             else:
                 loss = l_ce + l_cs
@@ -538,22 +525,22 @@ def main():
                                  'Adv/mem_tc': mem_tc.mean().item(),
                                  'His/mem_tc': wandb.Histogram(hismem_tc.cpu().detach().numpy(), num_bins=512),
                                  'lr': optimizer.param_groups[0]['lr']})
-                        if run_adv and mask_1.sum()>0:
+                        if mask_1.sum()>0:
                             pip = (normalize_flatten_features(feat_adv) - \
-                                   normalize_flatten_features(feat_ori)[mask_smooth].detach()).norm(dim=1)
+                                   normalize_flatten_features(feat_ori).detach()).norm(dim=1)
                             pip_s = (normalize_flatten_features(feats_w) - \
-                                   normalize_flatten_features(feats_s)).norm(dim=1)[mask_smooth][mask_1]
-                            prec_pesudo_adv = (targets_ux[mask_smooth] == targets_adv)[mask_1].float().mean()
-                            l2_norm = (inputs_adv[mask_1] - (inputs_u_s[mask_smooth])[mask_1]).reshape(
-                                (inputs_u_w[mask_smooth])[mask_1].shape[0], -1).norm(dim=1)
+                                   normalize_flatten_features(feats_s)).norm(dim=1)[mask_1]
+                            prec_pesudo_adv = (targets_ux == targets_adv)[mask_1].float().mean()
+                            l2_norm = (inputs_adv[mask_1] - inputs_u_s[mask_1]).reshape(
+                                inputs_u_w[mask_1].shape[0], -1).norm(dim=1)
                             run.log({'loss/l_adv': l_adv.data.item(),
                                  'group1/y_adv': y_adv[mask_1].mean().cpu().detach().numpy(),
-                                 'group1/y_w': (y_w[mask_smooth])[mask_1].mean().cpu().detach().numpy(),
+                                 'group1/y_w': y_w[mask_1].mean().cpu().detach().numpy(),
                                  'group1/pip': pip[mask_1].mean().cpu().detach().numpy(),
                                  'group1/pip_s': pip_s.mean().cpu().detach().numpy(),
-                                 'group1/pesudo_acc': (pesudo_accuracy[mask_smooth])[mask_1].mean().cpu().detach().numpy(),
+                                 'group1/pesudo_acc': pesudo_accuracy[mask_1].mean().cpu().detach().numpy(),
                                  'group1/prec_adv': prec_pesudo_adv.item(),
-                                 'group1/prec_strong': prec_unlab_strong[mask_smooth][mask_1].mean().item(),
+                                 'group1/prec_strong': prec_unlab_strong[mask_1].mean().item(),
                                  'group1/num': mask_1.sum().cpu().detach().numpy(),
                                  'group1/l2_norm': torch.mean(l2_norm).cpu().detach().numpy(),
                                  'group1/l2_norm_his': wandb.Histogram(l2_norm.cpu().detach().numpy(), num_bins=512)}, commit=False)
